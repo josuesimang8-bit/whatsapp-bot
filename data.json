@@ -1,0 +1,34 @@
+{
+  "steps": [
+    {
+      "id": "1",
+      "type": "message",
+      "text": "Certo, irei mandar uns detalhes abaixo e quero que você me responda o mais rápido possível.",
+      "media": null
+    },
+    {
+      "id": "2",
+      "type": "wait",
+      "duration": "20"
+    },
+    {
+      "id": "3",
+      "type": "question",
+      "text": "Me diga o seu nome, o seu número, sua província e o seu bairro, para nós conseguirmos fazer a entrega do Congelador.\n",
+      "media": null
+    },
+    {
+      "id": "1782512397728",
+      "type": "wait",
+      "text": "",
+      "media": null,
+      "duration": "20"
+    },
+    {
+      "id": "1782512405015",
+      "type": "message",
+      "text": "Parabéns, estás a 2 passos de garantir o seu Congelador aí contigo, Mas antes vou mandar uns depoimentos de pessoas que já receberam.",
+      "media": null
+    }
+  ]
+}

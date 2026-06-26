@@ -1,0 +1,1394 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Bot WhatsApp - Umbler Style</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #128C7E;
+            --primary-dark: #075E54;
+            --accent: #25D366;
+            --bg-light: #f0f2f5;
+            --card-bg: #ffffff;
+            --text-main: #333333;
+            --text-muted: #666666;
+            --border-color: #e2e8f0;
+            --shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+            --radius: 12px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-light);
+            color: var(--text-main);
+            line-height: 1.6;
+            padding: 20px;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .container {
+            max-width: 1200px;
+            width: 100%;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            background: var(--card-bg);
+            padding: 16px 20px;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            flex-shrink: 0;
+        }
+
+        h1 {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--primary-dark);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        /* Status Widget */
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 30px;
+            font-size: 13px;
+            font-weight: 600;
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        .status-badge.connected {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .status-badge .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+
+        /* QR Code Container */
+        .qr-section {
+            background: var(--card-bg);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 24px;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .qr-section p {
+            font-size: 16px;
+            color: var(--text-muted);
+            margin-bottom: 20px;
+        }
+
+        .qr-wrapper {
+            padding: 15px;
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        }
+
+        .qr-wrapper img {
+            width: 250px;
+            height: 250px;
+            display: block;
+        }
+
+        /* Navigation Tabs */
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 16px;
+            flex-shrink: 0;
+        }
+
+        .tab-btn {
+            background: #e2e8f0;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            color: var(--text-muted);
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .tab-btn.active {
+            background: var(--primary);
+            color: white;
+            box-shadow: 0 4px 10px rgba(18, 140, 126, 0.25);
+        }
+
+        /* Main Sections Panels */
+        .panel {
+            display: none;
+            flex: 1;
+            overflow: hidden;
+            background: var(--card-bg);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            border: 1px solid var(--border-color);
+        }
+
+        .panel.active {
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* FLOW BUILDER TAB */
+        .flow-builder-scroll {
+            padding: 20px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .flow-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .flow-header h2 {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .save-btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 4px 10px rgba(18, 140, 126, 0.2);
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .save-btn:hover {
+            background: var(--primary-dark);
+            transform: translateY(-2px);
+        }
+
+        /* Blocks Timeline */
+        .timeline {
+            position: relative;
+            padding-left: 20px;
+            border-left: 3px dashed var(--border-color);
+            margin-left: 15px;
+            margin-bottom: 30px;
+        }
+
+        .step-card {
+            position: relative;
+            background: var(--card-bg);
+            border-radius: var(--radius);
+            padding: 20px;
+            margin-bottom: 24px;
+            border: 1px solid var(--border-color);
+        }
+
+        .step-card::before {
+            content: '';
+            position: absolute;
+            left: -32px;
+            top: 24px;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: var(--card-bg);
+            border: 4px solid var(--border-color);
+            z-index: 2;
+        }
+
+        .step-card.step-message::before { border-color: #3b82f6; }
+        .step-card.step-wait::before { border-color: #f59e0b; }
+        .step-card.step-question::before { border-color: #a855f7; }
+
+        .step-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 12px;
+        }
+
+        .step-type-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .step-message .step-type-title { color: #2563eb; }
+        .step-wait .step-type-title { color: #d97706; }
+        .step-question .step-type-title { color: #7c3aed; }
+
+        .step-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .action-btn {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            color: var(--text-muted);
+            padding: 4px 6px;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+
+        .action-btn:hover {
+            background: #f1f5f9;
+        }
+
+        .action-btn.delete:hover {
+            background: #fee2e2;
+            color: #ef4444;
+        }
+
+        .field-group {
+            margin-bottom: 12px;
+        }
+
+        .field-group label {
+            display: block;
+            font-size: 11px;
+            text-transform: uppercase;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+
+        .field-group textarea, .field-group input[type="text"], .field-group input[type="number"] {
+            width: 100%;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-family: inherit;
+            font-size: 14px;
+            outline: none;
+        }
+
+        .media-uploader {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-top: 8px;
+            padding: 8px;
+            border: 1px dashed var(--border-color);
+            border-radius: 8px;
+            background: #fafafa;
+        }
+
+        .media-uploader input[type="file"] {
+            display: none;
+        }
+
+        .upload-label {
+            background: #f1f5f9;
+            color: var(--text-main);
+            padding: 5px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            border: 1px solid #cbd5e1;
+        }
+
+        .media-filename {
+            font-size: 13px;
+            color: var(--text-muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 250px;
+        }
+
+        .remove-media-btn {
+            color: #ef4444;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .add-block-container {
+            display: flex;
+            gap: 12px;
+            margin-top: 10px;
+            margin-bottom: 30px;
+            justify-content: center;
+        }
+
+        .add-btn {
+            background: white;
+            border: 1px solid var(--border-color);
+            padding: 10px 18px;
+            border-radius: 30px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: var(--shadow);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .add-btn.add-message { border-left: 4px solid #3b82f6; }
+        .add-btn.add-wait { border-left: 4px solid #f59e0b; }
+        .add-btn.add-question { border-left: 4px solid #a855f7; }
+
+        .help-text {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        /* LIVE CHAT TAB */
+        .livechat-layout {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* Chat Sidebar (Left) */
+        .chat-sidebar {
+            width: 320px;
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            background: #fafafa;
+        }
+
+        .sidebar-header {
+            padding: 15px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .sidebar-header input {
+            width: 100%;
+            padding: 8px 12px;
+            border-radius: 20px;
+            border: 1px solid var(--border-color);
+            font-family: inherit;
+            font-size: 13px;
+            outline: none;
+        }
+
+        .chat-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .chat-item {
+            display: flex;
+            flex-direction: column;
+            padding: 14px 16px;
+            border-bottom: 1px solid #f1f5f9;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .chat-item:hover {
+            background: #f1f5f9;
+        }
+
+        .chat-item.active {
+            background: #e6f4f1;
+            border-left: 4px solid var(--primary);
+        }
+
+        .chat-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+        }
+
+        .chat-item-name {
+            font-weight: 600;
+            font-size: 14px;
+            color: var(--text-main);
+        }
+
+        .chat-item-time {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .chat-item-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        /* Status badges for Live Chat List */
+        .bot-status-tag {
+            font-size: 10px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-weight: 600;
+        }
+
+        .bot-status-tag.idle { background: #e2e8f0; color: #475569; }
+        .bot-status-tag.running { background: #dbeafe; color: #1e40af; }
+        .bot-status-tag.waiting_reply { background: #fef3c7; color: #92400e; }
+        .bot-status-tag.completed { background: #d1fae5; color: #065f46; }
+        .bot-status-tag.paused { background: #f3e8ff; color: #6b21a8; }
+
+        .unread-badge {
+            background: var(--accent);
+            color: white;
+            font-size: 11px;
+            font-weight: 700;
+            border-radius: 50%;
+            width: 18px;
+            height: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Chat Window (Right) */
+        .chat-window {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: #efeae2; /* WhatsApp chat background colour */
+        }
+
+        .chat-window-placeholder {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            flex: 1;
+            color: var(--text-muted);
+            background: var(--card-bg);
+            text-align: center;
+            padding: 40px;
+        }
+
+        .chat-window-header {
+            padding: 12px 20px;
+            background: white;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+
+        .active-chat-info h3 {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+
+        .active-chat-status {
+            font-size: 12px;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 2px;
+        }
+
+        .active-chat-status .bot-status-tag {
+            font-size: 11px;
+        }
+
+        .chat-window-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .chat-window-actions button {
+            background: white;
+            border: 1px solid var(--border-color);
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .chat-window-actions button:hover {
+            background: #f1f5f9;
+            border-color: #cbd5e1;
+        }
+
+        .chat-window-actions button.reset-btn {
+            border-color: #f59e0b;
+            color: #d97706;
+        }
+
+        .chat-window-actions button.reset-btn:hover {
+            background: #fffbeb;
+        }
+
+        /* Message log scroll */
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .message-bubble {
+            max-width: 60%;
+            padding: 8px 14px;
+            border-radius: 12px;
+            font-size: 14.5px;
+            position: relative;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            word-break: break-word;
+        }
+
+        .message-bubble.incoming {
+            background: white;
+            align-self: flex-start;
+            border-top-left-radius: 0;
+        }
+
+        .message-bubble.outgoing {
+            background: #dcf8c6; /* WhatsApp user chat bubble */
+            align-self: flex-end;
+            border-top-right-radius: 0;
+        }
+
+        .message-time {
+            font-size: 10px;
+            color: var(--text-muted);
+            text-align: right;
+            margin-top: 4px;
+        }
+
+        /* Chat Input footer */
+        .chat-window-footer {
+            padding: 12px 20px;
+            background: #f0f2f5;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            border-top: 1px solid var(--border-color);
+            flex-shrink: 0;
+        }
+
+        .input-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .chat-input-textarea {
+            flex: 1;
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 10px 16px;
+            font-family: inherit;
+            font-size: 14.5px;
+            outline: none;
+            resize: none;
+            background: white;
+            max-height: 80px;
+            height: 40px;
+        }
+
+        .send-message-btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+            flex-shrink: 0;
+        }
+
+        .send-message-btn:hover {
+            background: var(--primary-dark);
+        }
+
+        /* Footer attachment row */
+        .attachment-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .attachment-uploader {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .attachment-uploader input[type="file"] {
+            display: none;
+        }
+
+        .attach-label {
+            background: #e2e8f0;
+            color: var(--text-main);
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            border: 1px solid #cbd5e1;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .attach-label:hover {
+            background: #cbd5e1;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #333;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 500;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            display: none;
+            z-index: 100;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from { transform: translateY(100px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+            Dashboard do Bot de WhatsApp
+        </h1>
+        <div id="statusBadge" class="status-badge">
+            <span class="dot"></span>
+            <span class="label">A verificar...</span>
+        </div>
+    </header>
+
+    <!-- QR Code Scanner (if disconnected) -->
+    <div id="qrSection" class="qr-section" style="display: none;">
+        <h2>Aparelho Desconectado</h2>
+        <p>Use o seu telemóvel para escanear o código abaixo e ligar o bot.</p>
+        <div class="qr-wrapper">
+            <img id="qrImage" src="" alt="Aguardando código QR...">
+        </div>
+    </div>
+
+    <!-- Navigation Tabs (if connected) -->
+    <div id="navTabs" class="tabs" style="display: none;">
+        <button class="tab-btn active" onclick="switchTab('builder')">
+            🛠️ Construtor de Fluxo
+        </button>
+        <button class="tab-btn" onclick="switchTab('chat')">
+            💬 Chat ao Vivo
+        </button>
+    </div>
+
+    <!-- FLOW BUILDER PANEL -->
+    <div id="builderPanel" class="panel active">
+        <div class="flow-builder-scroll">
+            <div class="flow-header">
+                <h2>Estrutura de Fluxo Automático</h2>
+                <button class="save-btn" onclick="saveFlow()">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                    Salvar Fluxo
+                </button>
+            </div>
+
+            <div id="timeline" class="timeline">
+                <!-- Step cards go here -->
+            </div>
+
+            <div class="add-block-container">
+                <button class="add-btn add-message" onclick="addStep('message')">
+                    💬 Mensagem
+                </button>
+                <button class="add-btn add-wait" onclick="addStep('wait')">
+                    ⏳ Aguardar
+                </button>
+                <button class="add-btn add-question" onclick="addStep('question')">
+                    ❓ Pergunta
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- LIVE CHAT PANEL -->
+    <div id="chatPanel" class="panel">
+        <div class="livechat-layout">
+            <!-- Sidebar Chats List -->
+            <div class="chat-sidebar">
+                <div class="sidebar-header">
+                    <input type="text" id="chatSearchInput" placeholder="Procurar conversa..." oninput="filterChats()">
+                </div>
+                <div id="chatList" class="chat-list">
+                    <!-- Chats render here -->
+                </div>
+            </div>
+
+            <!-- Active Chat Area -->
+            <div id="chatWindow" class="chat-window">
+                <div class="chat-window-placeholder" id="chatPlaceholder">
+                    <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="1.5"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+                    <h3 style="margin-top: 15px;">Nenhuma conversa selecionada</h3>
+                    <p style="font-size: 13px;">Selecione um contacto na barra lateral para começar a conversar e gerir o bot.</p>
+                </div>
+
+                <div id="activeChatArea" style="display: none; flex: 1; flex-direction: column; overflow: hidden;">
+                    <!-- Chat Header -->
+                    <div class="chat-window-header">
+                        <div class="active-chat-info">
+                            <h3 id="activeChatName">Nome</h3>
+                            <div class="active-chat-status">
+                                <span>Bot:</span>
+                                <span id="activeChatBotStatus" class="bot-status-tag idle">Idle</span>
+                            </div>
+                        </div>
+                        <div class="chat-window-header-actions chat-window-actions">
+                            <button id="togglePauseBtn" onclick="toggleActiveBotPause()">Pausar Bot</button>
+                            <button class="reset-btn" onclick="resetActiveBotFlow()">Reiniciar Bot</button>
+                        </div>
+                    </div>
+
+                    <!-- Chat Messages List -->
+                    <div id="chatMessages" class="chat-messages">
+                        <!-- Messages go here -->
+                    </div>
+
+                    <!-- Chat Footer Input -->
+                    <div class="chat-window-footer">
+                        <!-- Attachment Info Row -->
+                        <div class="attachment-row">
+                            <div class="attachment-uploader">
+                                <label class="attach-label" for="manualMedia">
+                                    📎 Enviar Mídia
+                                </label>
+                                <input type="file" id="manualMedia" onchange="handleManualMediaSelect()" accept="image/*,audio/*,video/*">
+                                <span class="media-filename" id="manualMediaFilename">Sem mídia anexada</span>
+                                <button class="remove-media-btn" id="removeManualMediaBtn" style="display: none;" onclick="clearManualMedia()">Remover</button>
+                            </div>
+                        </div>
+                        <!-- Message Input Row -->
+                        <div class="input-row">
+                            <textarea id="messageInput" class="chat-input-textarea" placeholder="Escreva uma mensagem..." onkeydown="handleInputKeydown(event)"></textarea>
+                            <button class="send-message-btn" onclick="sendManualMessage()">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="toast" class="toast">Ação concluída!</div>
+
+<script>
+    let steps = [];
+    let chats = [];
+    let activeChatId = null;
+    let chatInterval = null;
+    let messageInterval = null;
+
+    // Check status of WhatsApp connection
+    async function checkStatus() {
+        try {
+            const res = await fetch('/api/status');
+            const data = await res.json();
+            const badge = document.getElementById('statusBadge');
+            const qrSection = document.getElementById('qrSection');
+            const navTabs = document.getElementById('navTabs');
+            const builderPanel = document.getElementById('builderPanel');
+
+            if (data.ready) {
+                badge.className = 'status-badge connected';
+                badge.querySelector('.label').innerText = 'Conectado';
+                qrSection.style.display = 'none';
+                navTabs.style.display = 'flex';
+                
+                // Show default panel if none is active
+                if (document.querySelector('.panel.active') === null) {
+                    switchTab('builder');
+                }
+                
+                if (steps.length === 0) {
+                    loadFlow();
+                }
+            } else {
+                badge.className = 'status-badge';
+                badge.querySelector('.label').innerText = 'Desconectado';
+                navTabs.style.display = 'none';
+                document.getElementById('builderPanel').classList.remove('active');
+                document.getElementById('chatPanel').classList.remove('active');
+                
+                if (data.qr) {
+                    document.getElementById('qrImage').src = data.qr;
+                    qrSection.style.display = 'block';
+                } else {
+                    qrSection.style.display = 'none';
+                }
+                setTimeout(checkStatus, 3000);
+            }
+        } catch (e) {
+            console.error('Error checking status:', e);
+            setTimeout(checkStatus, 5000);
+        }
+    }
+
+    // Navigation Tab switcher
+    function switchTab(tab) {
+        const builderTab = document.querySelectorAll('.tab-btn')[0];
+        const chatTab = document.querySelectorAll('.tab-btn')[1];
+        const builderPanel = document.getElementById('builderPanel');
+        const chatPanel = document.getElementById('chatPanel');
+
+        // Reset intervals when switching tabs
+        clearInterval(chatInterval);
+        clearInterval(messageInterval);
+
+        if (tab === 'builder') {
+            builderTab.classList.add('active');
+            chatTab.classList.remove('active');
+            builderPanel.classList.add('active');
+            chatPanel.classList.remove('active');
+            loadFlow();
+        } else if (tab === 'chat') {
+            chatTab.classList.add('active');
+            builderTab.classList.remove('active');
+            chatPanel.classList.add('active');
+            builderPanel.classList.remove('active');
+            loadChats();
+            // Start polling chats every 4 seconds
+            chatInterval = setInterval(loadChats, 4000);
+            if (activeChatId) {
+                loadMessages();
+                // Start polling messages every 3 seconds
+                messageInterval = setInterval(loadMessages, 3000);
+            }
+        }
+    }
+
+    // Load saved flow from server
+    async function loadFlow() {
+        try {
+            const res = await fetch('/api/data');
+            const data = await res.json();
+            steps = data.steps || [];
+            renderFlow();
+        } catch (e) {
+            showToast('Erro ao carregar o fluxo.');
+        }
+    }
+
+    // Render the flow timeline in the UI
+    function renderFlow() {
+        const timeline = document.getElementById('timeline');
+        timeline.innerHTML = '';
+
+        if (steps.length === 0) {
+            timeline.innerHTML = '<p style="text-align: center; color: var(--text-muted); padding: 20px;">O fluxo está vazio. Adicione um bloco abaixo para começar!</p>';
+            return;
+        }
+
+        steps.forEach((step, index) => {
+            const card = document.createElement('div');
+            card.className = `step-card step-${step.type}`;
+            card.dataset.index = index;
+
+            let cardContent = '';
+
+            if (step.type === 'message' || step.type === 'question') {
+                cardContent = `
+                    <div class="step-header">
+                        <span class="step-type-title">
+                            ${step.type === 'message' ? '💬 Mensagem' : '❓ Pergunta'}
+                        </span>
+                        <div class="step-actions">
+                            <button class="action-btn" onclick="moveStep(${index}, -1)" title="Mover para cima">🔼</button>
+                            <button class="action-btn" onclick="moveStep(${index}, 1)" title="Mover para baixo">🔽</button>
+                            <button class="action-btn delete" onclick="deleteStep(${index})" title="Eliminar bloco">❌</button>
+                        </div>
+                    </div>
+                    <div class="field-group">
+                        <label>Texto da Mensagem</label>
+                        <textarea rows="3" placeholder="Escreva a sua mensagem aqui..." onchange="updateStepField(${index}, 'text', this.value)">${step.text || ''}</textarea>
+                    </div>
+                    <div class="field-group">
+                        <label>Mídia (Opcional - Imagem, Áudio, Vídeo)</label>
+                        <div class="media-uploader">
+                            <label class="upload-label" for="file-${index}">Escolher arquivo</label>
+                            <input type="file" id="file-${index}" onchange="uploadMedia(${index}, this)" accept="image/*,audio/*,video/*">
+                            <span class="media-filename" id="filename-${index}">${step.media ? step.media.split('/').pop() : 'Nenhum arquivo selecionado'}</span>
+                            ${step.media ? `<button class="remove-media-btn" onclick="removeMedia(${index})">Remover</button>` : ''}
+                        </div>
+                    </div>
+                `;
+                if (step.type === 'question') {
+                    cardContent += `<p class="help-text">💡 O bot irá pausar nesta pergunta e avançará assim que o cliente responder qualquer coisa.</p>`;
+                }
+            } else if (step.type === 'wait') {
+                cardContent = `
+                    <div class="step-header">
+                        <span class="step-type-title">⏳ Aguardar</span>
+                        <div class="step-actions">
+                            <button class="action-btn" onclick="moveStep(${index}, -1)">🔼</button>
+                            <button class="action-btn" onclick="moveStep(${index}, 1)">🔽</button>
+                            <button class="action-btn delete" onclick="deleteStep(${index})">❌</button>
+                        </div>
+                    </div>
+                    <div class="field-group" style="display: flex; align-items: center; gap: 10px;">
+                        <span style="font-size: 14px;">Esperar por</span>
+                        <input type="number" value="${step.duration || 3}" min="1" max="120" style="width: 80px;" onchange="updateStepField(${index}, 'duration', this.value)">
+                        <span style="font-size: 14px;">segundos antes de ir para o próximo passo.</span>
+                    </div>
+                `;
+            }
+
+            card.innerHTML = cardContent;
+            timeline.appendChild(card);
+        });
+    }
+
+    // Add a new step
+    function addStep(type) {
+        const newStep = {
+            id: Date.now().toString(),
+            type: type,
+            text: '',
+            media: null
+        };
+        if (type === 'wait') newStep.duration = 3;
+        steps.push(newStep);
+        renderFlow();
+    }
+
+    // Delete a step
+    function deleteStep(index) {
+        if (confirm('Deseja mesmo apagar este bloco?')) {
+            steps.splice(index, 1);
+            renderFlow();
+        }
+    }
+
+    // Move step up/down
+    function moveStep(index, direction) {
+        const targetIndex = index + direction;
+        if (targetIndex < 0 || targetIndex >= steps.length) return;
+        const temp = steps[index];
+        steps[index] = steps[targetIndex];
+        steps[targetIndex] = temp;
+        renderFlow();
+    }
+
+    // Update field value on changes
+    function updateStepField(index, field, value) {
+        steps[index][field] = value;
+    }
+
+    // Upload media file to server for step builder
+    async function uploadMedia(index, input) {
+        const file = input.files[0];
+        if (!file) return;
+
+        const formData = new FormData();
+        formData.append('media', file);
+
+        const filenameSpan = document.getElementById(`filename-${index}`);
+        filenameSpan.innerText = 'Enviando...';
+
+        try {
+            const res = await fetch('/api/upload', { method: 'POST', body: formData });
+            const data = await res.json();
+            if (data.filePath) {
+                steps[index].media = data.filePath;
+                renderFlow();
+                showToast('Arquivo carregado com sucesso!');
+            } else {
+                throw new Error();
+            }
+        } catch (e) {
+            filenameSpan.innerText = 'Erro no envio.';
+            showToast('Erro ao carregar o arquivo.');
+        }
+    }
+
+    // Remove media
+    function removeMedia(index) {
+        steps[index].media = null;
+        renderFlow();
+    }
+
+    // Save flow configuration
+    async function saveFlow() {
+        try {
+            const res = await fetch('/api/save-steps', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ steps: steps })
+            });
+            const data = await res.json();
+            if (data.success) {
+                showToast('Fluxo salvo com sucesso!');
+            } else {
+                showToast('Erro ao salvar o fluxo.');
+            }
+        } catch (e) {
+            showToast('Erro de conexão ao salvar.');
+        }
+    }
+
+
+    // LIVE CHAT LOGIC
+
+    // Load active chats list
+    async function loadChats() {
+        try {
+            const res = await fetch('/api/chats');
+            const data = await res.json();
+            chats = data.chats || [];
+            renderChats();
+        } catch (e) {
+            console.error('Error loading chats:', e);
+        }
+    }
+
+    // Render chats list sidebar
+    function renderChats() {
+        const chatList = document.getElementById('chatList');
+        const searchVal = document.getElementById('chatSearchInput').value.toLowerCase();
+        
+        chatList.innerHTML = '';
+        
+        const filtered = chats.filter(c => c.name.toLowerCase().includes(searchVal) || c.id.includes(searchVal));
+
+        if (filtered.length === 0) {
+            chatList.innerHTML = '<p style="text-align: center; color: var(--text-muted); padding: 20px; font-size: 13px;">Nenhuma conversa encontrada</p>';
+            return;
+        }
+
+        filtered.forEach(chat => {
+            const item = document.createElement('div');
+            item.className = `chat-item ${chat.id === activeChatId ? 'active' : ''}`;
+            item.onclick = () => selectChat(chat.id, chat.name, chat.botStatus);
+
+            let statusLabel = '';
+            let statusClass = chat.botStatus;
+            
+            if (chat.botStatus === 'idle') statusLabel = 'Sem Fluxo';
+            else if (chat.botStatus === 'running') statusLabel = '🤖 Ativo';
+            else if (chat.botStatus === 'waiting_reply') statusLabel = '❓ Esperando';
+            else if (chat.botStatus === 'completed') statusLabel = '✅ Concluído';
+            else if (chat.botStatus === 'paused') statusLabel = '⏸️ Pausado';
+
+            const timeStr = new Date(chat.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+            item.innerHTML = `
+                <div class="chat-item-header">
+                    <span class="chat-item-name">${chat.name}</span>
+                    <span class="chat-item-time">${timeStr}</span>
+                </div>
+                <div class="chat-item-footer">
+                    <span class="bot-status-tag ${statusClass}">${statusLabel}</span>
+                    ${chat.unreadCount > 0 ? `<span class="unread-badge">${chat.unreadCount}</span>` : ''}
+                </div>
+            `;
+            chatList.appendChild(item);
+        });
+    }
+
+    // Filter list
+    function filterChats() {
+        renderChats();
+    }
+
+    // Select active chat from sidebar
+    function selectChat(id, name, botStatus) {
+        activeChatId = id;
+        
+        // UI updates
+        document.getElementById('chatPlaceholder').style.display = 'none';
+        document.getElementById('activeChatArea').style.display = 'flex';
+        
+        document.getElementById('activeChatName').innerText = name;
+        updateBotStatusLabel(botStatus);
+        
+        // Clear message log and reload messages
+        document.getElementById('chatMessages').innerHTML = '<p style="text-align: center; color: var(--text-muted); padding: 20px;">Carregando mensagens...</p>';
+        loadMessages();
+
+        // Reset message polling interval
+        clearInterval(messageInterval);
+        messageInterval = setInterval(loadMessages, 3000);
+
+        // Highlight selected item
+        renderChats();
+    }
+
+    // Helper to update active status labels
+    function updateBotStatusLabel(status) {
+        const badge = document.getElementById('activeChatBotStatus');
+        const pauseBtn = document.getElementById('togglePauseBtn');
+        badge.className = `bot-status-tag ${status}`;
+        
+        if (status === 'idle') {
+            badge.innerText = 'Sem Fluxo';
+            pauseBtn.innerText = 'Pausar Bot';
+            pauseBtn.disabled = true;
+        } else if (status === 'running') {
+            badge.innerText = '🤖 Ativo';
+            pauseBtn.innerText = 'Pausar Bot';
+            pauseBtn.disabled = false;
+        } else if (status === 'waiting_reply') {
+            badge.innerText = '❓ Esperando resposta';
+            pauseBtn.innerText = 'Pausar Bot';
+            pauseBtn.disabled = false;
+        } else if (status === 'completed') {
+            badge.innerText = '✅ Concluído';
+            pauseBtn.innerText = 'Pausar Bot';
+            pauseBtn.disabled = true;
+        } else if (status === 'paused') {
+            badge.innerText = '⏸️ Pausado';
+            pauseBtn.innerText = 'Retomar Bot';
+            pauseBtn.disabled = false;
+        }
+    }
+
+    // Load active messages
+    async function loadMessages() {
+        if (!activeChatId) return;
+        try {
+            const res = await fetch(`/api/chats/${activeChatId}/messages`);
+            const data = await res.json();
+            renderMessages(data.messages || []);
+        } catch (e) {
+            console.error('Error loading messages:', e);
+        }
+    }
+
+    // Render active messages
+    function renderMessages(messages) {
+        const msgContainer = document.getElementById('chatMessages');
+        const wasScrolledToBottom = msgContainer.scrollHeight - msgContainer.clientHeight <= msgContainer.scrollTop + 100;
+        
+        msgContainer.innerHTML = '';
+        
+        if (messages.length === 0) {
+            msgContainer.innerHTML = '<p style="text-align: center; color: var(--text-muted); padding: 20px;">Nenhuma mensagem no histórico</p>';
+            return;
+        }
+
+        messages.forEach(msg => {
+            const bubble = document.createElement('div');
+            bubble.className = `message-bubble ${msg.fromMe ? 'outgoing' : 'incoming'}`;
+            
+            const timeStr = new Date(msg.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            
+            let content = msg.body;
+            if (msg.hasMedia) {
+                content = `<i>[Arquivo de Mídia]</i><br>` + content;
+            }
+
+            bubble.innerHTML = `
+                <div class="message-body">${content}</div>
+                <div class="message-time">${timeStr}</div>
+            `;
+            msgContainer.appendChild(bubble);
+        });
+
+        // Auto Scroll to bottom
+        if (wasScrolledToBottom || msgContainer.querySelector('.message-bubble') && msgContainer.innerHTML !== '') {
+            msgContainer.scrollTop = msgContainer.scrollHeight;
+        }
+    }
+
+    // Reset bot state for active contact
+    async function resetActiveBotFlow() {
+        if (!activeChatId) return;
+        if (confirm('Reiniciar o fluxo para este utilizador? O bot começará no passo 1 na próxima mensagem dele.')) {
+            try {
+                const res = await fetch(`/api/chats/${activeChatId}/reset`, { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    updateBotStatusLabel(data.status);
+                    showToast('Fluxo do Bot reiniciado!');
+                    loadChats();
+                }
+            } catch (e) {
+                showToast('Erro ao reiniciar.');
+            }
+        }
+    }
+
+    // Toggle pause bot manually
+    async function toggleActiveBotPause() {
+        if (!activeChatId) return;
+        try {
+            const res = await fetch(`/api/chats/${activeChatId}/toggle-pause`, { method: 'POST' });
+            const data = await res.json();
+            if (data.success) {
+                updateBotStatusLabel(data.status);
+                showToast(data.status === 'paused' ? 'Bot Pausado!' : 'Bot Ativado!');
+                loadChats();
+            }
+        } catch (e) {
+            showToast('Erro ao atualizar estado.');
+        }
+    }
+
+    // Handle attachments for manual chat sending
+    let manualMediaFile = null;
+
+    function handleManualMediaSelect() {
+        const input = document.getElementById('manualMedia');
+        const filenameSpan = document.getElementById('manualMediaFilename');
+        const removeBtn = document.getElementById('removeManualMediaBtn');
+
+        if (input.files.length > 0) {
+            manualMediaFile = input.files[0];
+            filenameSpan.innerText = manualMediaFile.name;
+            removeBtn.style.display = 'inline-block';
+        }
+    }
+
+    function clearManualMedia() {
+        document.getElementById('manualMedia').value = '';
+        manualMediaFile = null;
+        document.getElementById('manualMediaFilename').innerText = 'Sem mídia anexada';
+        document.getElementById('removeManualMediaBtn').style.display = 'none';
+    }
+
+    // Send manual message
+    async function sendManualMessage() {
+        if (!activeChatId) return;
+        const textarea = document.getElementById('messageInput');
+        const text = textarea.value.trim();
+
+        if (!text && !manualMediaFile) return;
+
+        const formData = new FormData();
+        formData.append('text', text);
+        if (manualMediaFile) {
+            formData.append('media', manualMediaFile);
+        }
+
+        textarea.value = '';
+        clearManualMedia();
+
+        try {
+            const res = await fetch(`/api/chats/${activeChatId}/send`, {
+                method: 'POST',
+                body: formData
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadMessages();
+                loadChats();
+                // Bot will be paused after manual sending, update label
+                updateBotStatusLabel('paused');
+            } else {
+                showToast('Falha ao enviar mensagem.');
+            }
+        } catch (e) {
+            showToast('Erro de rede ao enviar.');
+        }
+    }
+
+    // Enter to send
+    function handleInputKeydown(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendManualMessage();
+        }
+    }
+
+    // Display a quick toast message
+    function showToast(msg) {
+        const toast = document.getElementById('toast');
+        toast.innerText = msg;
+        toast.style.display = 'block';
+        setTimeout(() => {
+            toast.style.display = 'none';
+        }, 3000);
+    }
+
+    // Init
+    checkStatus();
+</script>
+</body>
+</html>
