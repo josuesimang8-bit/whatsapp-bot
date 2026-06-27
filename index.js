@@ -67,6 +67,26 @@ let clientReady = false;
 let initStatus = 'disconnected'; // 'disconnected' | 'initializing' | 'waiting_qr' | 'ready' | 'error'
 let initError = '';
 
+function getChromiumPath() {
+    const paths = [
+        process.env.PUPPETEER_EXECUTABLE_PATH,
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome'
+    ];
+    
+    for (const p of paths) {
+        if (p && fs.existsSync(p)) {
+            console.log(`Found Chromium executable at: ${p}`);
+            return p;
+        }
+    }
+    
+    console.log('No specific Chromium executable found, letting Puppeteer choose default.');
+    return undefined;
+}
+
 function initWhatsAppClient() {
     if (clientReady || initStatus === 'ready' || initStatus === 'waiting_qr' || initStatus === 'initializing') {
         console.log('Client is already active or initializing.');
@@ -92,7 +112,7 @@ function initWhatsAppClient() {
                 '--disable-extensions',
                 '--disable-software-rasterizer'
             ],
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
+            executablePath: getChromiumPath()
         }
     });
 
