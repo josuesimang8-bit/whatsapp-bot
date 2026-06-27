@@ -734,9 +734,12 @@
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
             Dashboard do Bot de WhatsApp
         </h1>
-        <div id="statusBadge" class="status-badge">
-            <span class="dot"></span>
-            <span class="label">A verificar...</span>
+        <div style="display: flex; align-items: center; gap: 12px;">
+            <button id="connectionActionBtn" onclick="handleConnectionAction()" style="background: var(--primary); color: white; border: none; padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: none;">Conectar Bot</button>
+            <div id="statusBadge" class="status-badge">
+                <span class="dot"></span>
+                <span class="label">A verificar...</span>
+            </div>
         </div>
     </header>
 
@@ -864,7 +867,9 @@
     let chats = [];
     let activeChatId = null;
     let chatInterval = null;
-    l    // Check status of WhatsApp connection
+    let messageInterval = null;
+
+    // Check status of WhatsApp connection
     async function checkStatus() {
         try {
             const res = await fetch('/api/status');
@@ -874,6 +879,19 @@
             const navTabs = document.getElementById('navTabs');
             const builderPanel = document.getElementById('builderPanel');
             const qrImage = document.getElementById('qrImage');
+            const connBtn = document.getElementById('connectionActionBtn');
+
+            // Update connection button state
+            if (connBtn) {
+                connBtn.style.display = 'block';
+                if (data.ready || data.status === 'initializing' || data.status === 'waiting_qr') {
+                    connBtn.innerText = 'Desconectar Bot';
+                    connBtn.style.background = '#ef4444'; // Red
+                } else {
+                    connBtn.innerText = 'Conectar Bot';
+                    connBtn.style.background = 'var(--primary)'; // Green
+                }
+            }
 
             // Update badge label based on status
             if (data.ready) {
@@ -950,6 +968,44 @@
         } catch (e) {
             console.error('Error checking status:', e);
             setTimeout(checkStatus, 5000);
+        }
+    }
+
+    // Handle manual connection/disconnection action
+    async function handleConnectionAction() {
+        const connBtn = document.getElementById('connectionActionBtn');
+        if (!connBtn) return;
+        const text = connBtn.innerText;
+        connBtn.disabled = true;
+        
+        try {
+            if (text === 'Conectar Bot') {
+                connBtn.innerText = 'A conectar...';
+                const res = await fetch('/api/connect', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('Inicialização do Bot iniciada!');
+                } else {
+                    showToast('Erro: ' + (data.error || data.message));
+                }
+            } else {
+                if (confirm('Tem a certeza que quer desconectar o bot? A sessão do WhatsApp Web será encerrada.')) {
+                    connBtn.innerText = 'A desconectar...';
+                    const res = await fetch('/api/disconnect', { method: 'POST' });
+                    const data = await res.json();
+                    if (data.success) {
+                        showToast('Bot desconectado com sucesso.');
+                    } else {
+                        showToast('Erro ao desconectar.');
+                    }
+                }
+            }
+        } catch (e) {
+            console.error('Connection action error:', e);
+            showToast('Erro de rede.');
+        } finally {
+            connBtn.disabled = false;
+            checkStatus();
         }
     }
 

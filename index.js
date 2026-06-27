@@ -61,76 +61,122 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 // WhatsApp Client
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-        headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--disable-gpu',
-            '--disable-extensions',
-            '--disable-software-rasterizer'
-        ],
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
-    }
-});
-
+let client = null;
 let currentQR = '';
 let clientReady = false;
-let initStatus = 'initializing'; // 'initializing' | 'waiting_qr' | 'ready' | 'error'
+let initStatus = 'disconnected'; // 'disconnected' | 'initializing' | 'waiting_qr' | 'ready' | 'error'
 let initError = '';
 
-client.on('qr', (qr) => {
-    console.log('QR Code generated. Please scan to authenticate.');
-    initStatus = 'waiting_qr';
-    qrcode.toDataURL(qr, (err, url) => {
-        if (!err) {
-            currentQR = url;
-            console.log('QR Code data URL created successfully.');
-        } else {
-            console.error('Error generating QR data URL:', err);
+function initWhatsAppClient() {
+    if (clientReady || initStatus === 'ready' || initStatus === 'waiting_qr' || initStatus === 'initializing') {
+        console.log('Client is already active or initializing.');
+        return;
+    }
+
+    console.log('Initializing WhatsApp client...');
+    initStatus = 'initializing';
+    initError = '';
+    currentQR = '';
+
+    client = new Client({
+        authStrategy: new LocalAuth(),
+        puppeteer: {
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--disable-gpu',
+                '--disable-extensions',
+                '--disable-software-rasterizer'
+            ],
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
         }
     });
-});
 
-client.on('ready', () => {
-    console.log('Client is ready!');
-    clientReady = true;
-    currentQR = '';
-    initStatus = 'ready';
-    initError = '';
-});
-
-client.on('authenticated', () => {
-    console.log('Authenticated successfully!');
-});
-
-client.on('auth_failure', (msg) => {
-    console.error('Authentication failed:', msg);
-    clientReady = false;
-    initStatus = 'error';
-    initError = 'Authentication failed. Delete .wwebjs_auth folder and restart.';
-});
-
-client.on('disconnected', (reason) => {
-    console.log('Client disconnected:', reason);
-    clientReady = false;
-    currentQR = '';
-    initStatus = 'initializing';
-    // Attempt to reconnect after 5 seconds
-    setTimeout(() => {
-        console.log('Attempting to reconnect...');
-        client.initialize().catch(err => {
-            console.error('Reconnection failed:', err);
-            initStatus = 'error';
-            initError = err.message;
+    client.on('qr', (qr) => {
+        console.log('QR Code generated. Please scan to authenticate.');
+        initStatus = 'waiting_qr';
+        qrcode.toDataURL(qr, (err, url) => {
+            if (!err) {
+                currentQR = url;
+            } else {
+                console.error('Error generating QR data URL:', err);
+            }
         });
-    }, 5000);
-});
+    });
+
+    client.on('ready', () => {
+        console.log('Client is ready!');
+        clientReady = true;
+        currentQR = '';
+        initStatus = 'ready';
+        initError = '';
+    });
+
+    client.on('authenticated', () => {
+        console.log('Authenticated successfully!');
+    });
+
+    client.on('auth_failure', (msg) => {
+        console.error('Authentication failed:', msg);
+        clientReady = false;
+        initStatus = 'error';
+        initError = 'Authentication failed: ' + (msg || 'Check details.');
+    });
+
+    client.on('disconnected', (reason) => {
+        console.log('Client disconnected:', reason);
+        clientReady = false;
+        currentQR = '';
+        initStatus = 'disconnected';
+    });
+
+    client.on('message', async msg => {
+        // Ignore group chats
+        if (msg.from.endsWith('@g.us')) return;
+
+        // Only respond if client is fully ready
+        if (!clientReady) return;
+
+        const numberId = msg.from;
+        const state = userStates[numberId];
+
+        // Check for session timeout (does not apply to manually completed or paused states)
+        if (state && state.status !== 'completed' && state.status !== 'paused' && (Date.now() - state.lastActive > SESSION_TIMEOUT_MS)) {
+            console.log(`Session timed out for ${numberId}. Starting over.`);
+            if (state.waitTimeoutId) clearTimeout(state.waitTimeoutId);
+            delete userStates[numberId];
+        }
+
+        const updatedState = userStates[numberId];
+
+        if (updatedState) {
+            // If state is completed or paused, strictly ignore automated flow messages
+            if (updatedState.status === 'completed' || updatedState.status === 'paused') {
+                console.log(`Ignoring incoming flow message from ${numberId} because bot status is: ${updatedState.status}`);
+                return;
+            }
+
+            if (updatedState.status === 'waiting_reply') {
+                console.log(`Received reply from ${numberId} for question. Advancing flow.`);
+                executeStep(numberId, updatedState.currentStepIndex + 1);
+            }
+        } else {
+            // No active flow. Start from step 0.
+            console.log(`Starting new flow for ${numberId}`);
+            executeStep(numberId, 0);
+        }
+    });
+
+    client.initialize().catch(err => {
+        console.error('client.initialize() failed:', err);
+        initStatus = 'error';
+        initError = err.message || String(err);
+    });
+}
 
 // Flow Execution Logic
 const userStates = {}; // { numberId: { currentStepIndex, status: 'running'|'waiting_reply'|'completed'|'paused', lastActive, waitTimeoutId } }
@@ -235,48 +281,8 @@ async function sendStepMessage(numberId, step) {
     }
 }
 
-client.on('message', async msg => {
-    // Ignore group chats
-    if (msg.from.endsWith('@g.us')) return;
-
-    // Only respond if client is fully ready
-    if (!clientReady) return;
-
-    const numberId = msg.from;
-    const state = userStates[numberId];
-
-    // Check for session timeout (does not apply to manually completed or paused states)
-    if (state && state.status !== 'completed' && state.status !== 'paused' && (Date.now() - state.lastActive > SESSION_TIMEOUT_MS)) {
-        console.log(`Session timed out for ${numberId}. Starting over.`);
-        if (state.waitTimeoutId) clearTimeout(state.waitTimeoutId);
-        delete userStates[numberId];
-    }
-
-    const updatedState = userStates[numberId];
-
-    if (updatedState) {
-        // If state is completed or paused, strictly ignore automated flow messages
-        if (updatedState.status === 'completed' || updatedState.status === 'paused') {
-            console.log(`Ignoring incoming flow message from ${numberId} because bot status is: ${updatedState.status}`);
-            return;
-        }
-
-        if (updatedState.status === 'waiting_reply') {
-            console.log(`Received reply from ${numberId} for question. Advancing flow.`);
-            executeStep(numberId, updatedState.currentStepIndex + 1);
-        }
-    } else {
-        // No active flow. Start from step 0.
-        console.log(`Starting new flow for ${numberId}`);
-        executeStep(numberId, 0);
-    }
-});
-
-client.initialize().catch(err => {
-    console.error('Initial client.initialize() failed:', err);
-    initStatus = 'error';
-    initError = err.message || String(err);
-});
+// Start WhatsApp client on startup
+initWhatsAppClient();
 
 // API Routes
 app.get('/api/status', (req, res) => {
@@ -286,6 +292,58 @@ app.get('/api/status', (req, res) => {
         status: initStatus, 
         error: initError 
     });
+});
+
+app.post('/api/connect', (req, res) => {
+    try {
+        if (clientReady || initStatus === 'ready' || initStatus === 'waiting_qr' || initStatus === 'initializing') {
+            return res.json({ success: true, message: 'Bot is already active or initializing.' });
+        }
+        initWhatsAppClient();
+        res.json({ success: true, message: 'Initialization started.' });
+    } catch (err) {
+        console.error('Error starting bot:', err);
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+app.post('/api/disconnect', async (req, res) => {
+    try {
+        console.log('Request to disconnect client received.');
+        
+        // Cancel all timeouts in userStates
+        Object.keys(userStates).forEach(numberId => {
+            if (userStates[numberId] && userStates[numberId].waitTimeoutId) {
+                clearTimeout(userStates[numberId].waitTimeoutId);
+            }
+        });
+        
+        if (client) {
+            try {
+                if (clientReady) {
+                    await client.logout();
+                }
+            } catch (err) {
+                console.error('Error logging out client:', err);
+            }
+            
+            try {
+                await client.destroy();
+            } catch (err) {
+                console.error('Error destroying client:', err);
+            }
+        }
+        
+        client = null;
+        clientReady = false;
+        initStatus = 'disconnected';
+        currentQR = '';
+        initError = '';
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Error during client disconnection:', err);
+        res.status(500).json({ error: err.message || String(err) });
+    }
 });
 
 app.get('/api/data', (req, res) => {
