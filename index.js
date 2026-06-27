@@ -97,6 +97,7 @@ function initWhatsAppClient() {
     initStatus = 'initializing';
     initError = '';
     currentQR = '';
+    let readyTimestamp = Math.floor(Date.now() / 1000);
 
     client = new Client({
         authStrategy: new LocalAuth(),
@@ -134,6 +135,7 @@ function initWhatsAppClient() {
         currentQR = '';
         initStatus = 'ready';
         initError = '';
+        readyTimestamp = Math.floor(Date.now() / 1000);
     });
 
     client.on('authenticated', () => {
@@ -155,6 +157,12 @@ function initWhatsAppClient() {
     });
 
     client.on('message', async msg => {
+        // Ignore old catch-up messages received during bot offline period
+        if (msg.timestamp < readyTimestamp) {
+            console.log(`Ignoring old message from ${msg.from} sent before bot went online.`);
+            return;
+        }
+
         // Ignore group chats
         if (msg.from.endsWith('@g.us')) return;
 
