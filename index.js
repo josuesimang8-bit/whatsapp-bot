@@ -70,6 +70,13 @@ let initError = '';
 function getChromiumPath() {
     const paths = [
         process.env.PUPPETEER_EXECUTABLE_PATH,
+        // Windows Paths for Chrome and Edge (which have native media codecs)
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Google\\Chrome\\Application\\chrome.exe') : null,
+        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+        // Linux Paths
         '/usr/bin/chromium',
         '/usr/bin/chromium-browser',
         '/usr/bin/google-chrome-stable',
@@ -78,13 +85,41 @@ function getChromiumPath() {
     
     for (const p of paths) {
         if (p && fs.existsSync(p)) {
-            console.log(`Found Chromium executable at: ${p}`);
+            console.log(`Found browser executable at: ${p}`);
             return p;
         }
     }
     
-    console.log('No specific Chromium executable found, letting Puppeteer choose default.');
+    console.log('No specific browser executable found, letting Puppeteer choose default.');
     return undefined;
+}
+
+function getMessageMediaForFile(filePath) {
+    if (!fs.existsSync(filePath)) return null;
+    const ext = path.extname(filePath).toLowerCase();
+    const fileBuffer = fs.readFileSync(filePath);
+    const base64Data = fileBuffer.toString('base64');
+    const filename = path.basename(filePath);
+    
+    let mimetype = '';
+    if (ext === '.ogg') {
+        mimetype = 'audio/ogg; codecs=opus';
+    } else if (ext === '.mp3') {
+        mimetype = 'audio/mp3';
+    } else if (ext === '.wav') {
+        mimetype = 'audio/wav';
+    } else if (ext === '.m4a') {
+        mimetype = 'audio/mp4';
+    } else {
+        // Fallback to standard mime guess
+        const isImage = ext === '.jpg' || ext === '.jpeg' || ext === '.png' || ext === '.gif';
+        const isVideo = ext === '.mp4' || ext === '.mov' || ext === '.avi';
+        if (isImage) mimetype = 'image/' + (ext === '.jpg' ? 'jpeg' : ext.replace('.', ''));
+        else if (isVideo) mimetype = 'video/' + ext.replace('.', '');
+        else mimetype = 'application/octet-stream';
+    }
+    
+    return new MessageMedia(mimetype, base64Data, filename);
 }
 
 function initWhatsAppClient() {
@@ -280,9 +315,13 @@ async function sendStepMessage(numberId, step) {
 
         if (step.media) {
             const mediaPath = path.join(__dirname, step.media);
-            if (fs.existsSync(mediaPath)) {
-                const media = MessageMedia.fromFilePath(mediaPath);
-                await client.sendMessage(numberId, media, { caption: step.text || '' });
+            const media = getMessageMediaForFile(mediaPath);
+            if (media) {
+                if (isAudio) {
+                    await client.sendMessage(numberId, media, { sendAudioAsVoice: true });
+                } else {
+                    await client.sendMessage(numberId, media, { caption: step.text || '' });
+                }
             } else {
                 if (step.text) await client.sendMessage(numberId, step.text);
             }
@@ -295,9 +334,14 @@ async function sendStepMessage(numberId, step) {
         try {
             if (step.media) {
                 const mediaPath = path.join(__dirname, step.media);
-                if (fs.existsSync(mediaPath)) {
-                    const media = MessageMedia.fromFilePath(mediaPath);
-                    await client.sendMessage(numberId, media, { caption: step.text || '' });
+                const media = getMessageMediaForFile(mediaPath);
+                if (media) {
+                    const isAudio = step.media && (step.media.endsWith('.mp3') || step.media.endsWith('.ogg') || step.media.endsWith('.wav') || step.media.endsWith('.m4a'));
+                    if (isAudio) {
+                        await client.sendMessage(numberId, media, { sendAudioAsVoice: true });
+                    } else {
+                        await client.sendMessage(numberId, media, { caption: step.text || '' });
+                    }
                 } else {
                     if (step.text) await client.sendMessage(numberId, step.text);
                 }
@@ -486,8 +530,13 @@ app.post('/api/chats/:id/send', upload.single('media'), async (req, res) => {
     try {
         if (mediaFile) {
             const mediaPath = path.join(__dirname, 'uploads', mediaFile.filename);
-            const media = MessageMedia.fromFilePath(mediaPath);
-            await client.sendMessage(chatId, media, { caption: text || '' });
+            const media = getMessageMediaForFile(mediaPath);
+            const isAudio = mediaFile.filename.match(/\.(mp3|ogg|wav|m4a)$/i);
+            if (isAudio) {
+                await client.sendMessage(chatId, media, { sendAudioAsVoice: true });
+            } else {
+                await client.sendMessage(chatId, media, { caption: text || '' });
+            }
         } else if (text) {
             await client.sendMessage(chatId, text);
         } else {

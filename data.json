@@ -29,6 +29,123 @@
       "type": "message",
       "text": "Parabéns, estás a 2 passos de garantir o seu Congelador aí contigo, Mas antes vou mandar uns depoimentos de pessoas que já receberam.",
       "media": null
+    },
+    {
+      "id": "1782558739260",
+      "type": "wait",
+      "text": "",
+      "media": null,
+      "duration": "10"
+    },
+    {
+      "id": "1782558745987",
+      "type": "message",
+      "text": "",
+      "media": "uploads/1782558756878.jpg"
+    },
+    {
+      "id": "1782558758363",
+      "type": "wait",
+      "text": "",
+      "media": null,
+      "duration": "5"
+    },
+    {
+      "id": "1782558762363",
+      "type": "message",
+      "text": "",
+      "media": "uploads/1782558771082.jpg"
+    },
+    {
+      "id": "1782558772770",
+      "type": "wait",
+      "text": "",
+      "media": null,
+      "duration": "5"
+    },
+    {
+      "id": "1782558777276",
+      "type": "message",
+      "text": "",
+      "media": "uploads/1782558787318.mp4"
+    },
+    {
+      "id": "1782558788690",
+      "type": "wait",
+      "text": "",
+      "media": null,
+      "duration": "5"
+    },
+    {
+      "id": "1782558792451",
+      "type": "message",
+      "text": "",
+      "media": "uploads/1782558802573.mp4"
+    },
+    {
+      "id": "1782558814203",
+      "type": "wait",
+      "text": "",
+      "media": null,
+      "duration": "20"
+    },
+    {
+      "id": "1782558826714",
+      "type": "question",
+      "text": "Você quer ganhar o Congelador hoje?",
+      "media": null
+    },
+    {
+      "id": "1782558863083",
+      "type": "wait",
+      "text": "",
+      "media": null,
+      "duration": "14"
+    },
+    {
+      "id": "1782558877771",
+      "type": "message",
+      "text": "",
+      "media": "uploads/1782558888713.ogg"
+    },
+    {
+      "id": "1782558899897",
+      "type": "wait",
+      "text": "",
+      "media": null,
+      "duration": "26"
+    },
+    {
+      "id": "1782558946793",
+      "type": "message",
+      "text": "",
+      "media": "uploads/1782558960655.ogg"
+    },
+    {
+      "id": "1782558976554",
+      "type": "wait",
+      "text": "",
+      "media": null,
+      "duration": "30"
+    },
+    {
+      "id": "1782558995019",
+      "type": "message",
+      "text": "Optima escolha, agora só precisas completar pagando o valor de Transporte de 500 meticais para:\n\neMola: 876821950 - Augusto Jacob Chamaita",
+      "media": null
+    },
+    {
+      "id": "1782559030585",
+      "type": "wait",
+      "text": "",
+      "media": null,
+      "duration": "120"
+    },
+    {
+      "id": "1782559042377",
+      "type": "message",
+      "text": "",
+      "media": "uploads/1782559051380.ogg"
     }
   ]
 }
