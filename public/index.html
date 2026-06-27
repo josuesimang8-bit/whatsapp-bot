@@ -864,9 +864,7 @@
     let chats = [];
     let activeChatId = null;
     let chatInterval = null;
-    let messageInterval = null;
-
-    // Check status of WhatsApp connection
+    l    // Check status of WhatsApp connection
     async function checkStatus() {
         try {
             const res = await fetch('/api/status');
@@ -875,7 +873,9 @@
             const qrSection = document.getElementById('qrSection');
             const navTabs = document.getElementById('navTabs');
             const builderPanel = document.getElementById('builderPanel');
+            const qrImage = document.getElementById('qrImage');
 
+            // Update badge label based on status
             if (data.ready) {
                 badge.className = 'status-badge connected';
                 badge.querySelector('.label').innerText = 'Conectado';
@@ -892,16 +892,58 @@
                 }
             } else {
                 badge.className = 'status-badge';
-                badge.querySelector('.label').innerText = 'Desconectado';
-                navTabs.style.display = 'none';
-                document.getElementById('builderPanel').classList.remove('active');
-                document.getElementById('chatPanel').classList.remove('active');
                 
-                if (data.qr) {
+                let labelText = 'Desconectado';
+                if (data.status === 'initializing') {
+                    labelText = '⚙️ A iniciar...';
+                } else if (data.status === 'error') {
+                    labelText = '❌ Erro de Inicialização';
+                } else if (data.status === 'waiting_qr') {
+                    labelText = '🔑 Aguardando QR';
+                }
+                badge.querySelector('.label').innerText = labelText;
+                
+                navTabs.style.display = 'none';
+                if (builderPanel) builderPanel.classList.remove('active');
+                const chatPanel = document.getElementById('chatPanel');
+                if (chatPanel) chatPanel.classList.remove('active');
+                
+                if (data.status === 'error' && data.error) {
+                    qrSection.style.display = 'block';
+                    qrSection.innerHTML = `
+                        <h2 style="color: #ef4444;">Erro ao Iniciar o WhatsApp</h2>
+                        <p style="color: var(--text-muted); margin-bottom: 20px;">Ocorreu o seguinte erro ao tentar iniciar o navegador Puppeteer:</p>
+                        <div style="background: #fee2e2; border: 1px solid #fecaca; color: #991b1b; padding: 15px; border-radius: var(--radius); text-align: left; font-family: monospace; font-size: 13px; max-width: 600px; margin: 0 auto; overflow-x: auto;">
+                            ${data.error}
+                        </div>
+                        <p style="margin-top: 20px; font-size: 14px;">Por favor, verifique os logs de deploy no Render.</p>
+                    `;
+                } else if (data.qr) {
+                    // Restore original HTML if it was overwritten by error message
+                    if (!document.getElementById('qrImage')) {
+                        qrSection.innerHTML = `
+                            <h2>Aparelho Desconectado</h2>
+                            <p>Use o seu telemóvel para escanear o código abaixo e ligar o bot.</p>
+                            <div class="qr-wrapper">
+                                <img id="qrImage" src="" alt="Aguardando código QR...">
+                            </div>
+                        `;
+                    }
                     document.getElementById('qrImage').src = data.qr;
                     qrSection.style.display = 'block';
                 } else {
-                    qrSection.style.display = 'none';
+                    qrSection.style.display = 'block';
+                    qrSection.innerHTML = `
+                        <h2>A Iniciar o Bot...</h2>
+                        <p>O navegador oculto do WhatsApp Web está a ser iniciado no servidor. Por favor, aguarde alguns segundos...</p>
+                        <div style="margin: 20px auto; border: 4px solid #f3f3f3; border-top: 4px solid var(--primary); border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite;"></div>
+                        <style>
+                            @keyframes spin {
+                                0% { transform: rotate(0deg); }
+                                100% { transform: rotate(360deg); }
+                            }
+                        </style>
+                    `;
                 }
                 setTimeout(checkStatus, 3000);
             }

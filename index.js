@@ -71,9 +71,9 @@ const client = new Client({
             '--disable-dev-shm-usage',
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-gpu'
+            '--disable-gpu',
+            '--disable-extensions',
+            '--disable-software-rasterizer'
         ],
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
     }
@@ -81,33 +81,55 @@ const client = new Client({
 
 let currentQR = '';
 let clientReady = false;
+let initStatus = 'initializing'; // 'initializing' | 'waiting_qr' | 'ready' | 'error'
+let initError = '';
 
 client.on('qr', (qr) => {
-    qrcode.toDataURL(qr, (err, url) => {
-        if (!err) currentQR = url;
-    });
     console.log('QR Code generated. Please scan to authenticate.');
+    initStatus = 'waiting_qr';
+    qrcode.toDataURL(qr, (err, url) => {
+        if (!err) {
+            currentQR = url;
+            console.log('QR Code data URL created successfully.');
+        } else {
+            console.error('Error generating QR data URL:', err);
+        }
+    });
 });
 
 client.on('ready', () => {
     console.log('Client is ready!');
     clientReady = true;
     currentQR = '';
+    initStatus = 'ready';
+    initError = '';
 });
 
 client.on('authenticated', () => {
     console.log('Authenticated successfully!');
 });
 
-client.on('auth_failure', () => {
-    console.error('Authentication failed.');
+client.on('auth_failure', (msg) => {
+    console.error('Authentication failed:', msg);
     clientReady = false;
+    initStatus = 'error';
+    initError = 'Authentication failed. Delete .wwebjs_auth folder and restart.';
 });
 
-client.on('disconnected', () => {
-    console.log('Client disconnected.');
+client.on('disconnected', (reason) => {
+    console.log('Client disconnected:', reason);
     clientReady = false;
     currentQR = '';
+    initStatus = 'initializing';
+    // Attempt to reconnect after 5 seconds
+    setTimeout(() => {
+        console.log('Attempting to reconnect...');
+        client.initialize().catch(err => {
+            console.error('Reconnection failed:', err);
+            initStatus = 'error';
+            initError = err.message;
+        });
+    }, 5000);
 });
 
 // Flow Execution Logic
@@ -250,11 +272,20 @@ client.on('message', async msg => {
     }
 });
 
-client.initialize();
+client.initialize().catch(err => {
+    console.error('Initial client.initialize() failed:', err);
+    initStatus = 'error';
+    initError = err.message || String(err);
+});
 
 // API Routes
 app.get('/api/status', (req, res) => {
-    res.json({ ready: clientReady, qr: currentQR });
+    res.json({ 
+        ready: clientReady, 
+        qr: currentQR, 
+        status: initStatus, 
+        error: initError 
+    });
 });
 
 app.get('/api/data', (req, res) => {
