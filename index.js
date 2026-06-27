@@ -157,9 +157,10 @@ function initWhatsAppClient() {
     });
 
     client.on('message', async msg => {
-        // Ignore old catch-up messages received during bot offline period
-        if (msg.timestamp < readyTimestamp) {
-            console.log(`Ignoring old message from ${msg.from} sent before bot went online.`);
+        // Ignore messages received during the startup sync period (first 30 seconds after bot goes online)
+        const secondsOnline = Math.floor(Date.now() / 1000) - readyTimestamp;
+        if (secondsOnline < 30) {
+            console.log(`Ignoring message from ${msg.from} during startup cooling period (${secondsOnline}s online).`);
             return;
         }
 
