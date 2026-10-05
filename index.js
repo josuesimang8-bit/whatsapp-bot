@@ -266,6 +266,14 @@ function initWhatsAppClient() {
 
     client.on('authenticated', () => {
         console.log('Authenticated successfully!');
+        initStatus = 'authenticated';
+        currentQR = '';
+    });
+
+    client.on('loading_screen', (percent, message) => {
+        console.log(`WhatsApp Web Loading: ${percent}% - ${message}`);
+        initStatus = 'loading';
+        initError = `Sincronizando WhatsApp (${percent}%)...`;
     });
 
     client.on('auth_failure', (msg) => {
@@ -281,6 +289,7 @@ function initWhatsAppClient() {
         currentQR = '';
         initStatus = 'disconnected';
         await safeDestroyClient();
+        setTimeout(() => { initWhatsAppClient(); }, 3000);
     });
 
     client.on('message', async msg => {
