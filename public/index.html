@@ -955,9 +955,14 @@
                     if (!document.getElementById('qrImage')) {
                         qrSection.innerHTML = `
                             <h2>Aparelho Desconectado</h2>
-                            <p>Use o seu telemóvel para escanear o código abaixo e ligar o bot.</p>
+                            <p>Abra o WhatsApp no seu telemóvel &gt; Aparelhos conectados &gt; Conectar um aparelho e aponte para o código abaixo:</p>
                             <div class="qr-wrapper">
                                 <img id="qrImage" src="${data.qr}" alt="Aguardando código QR...">
+                            </div>
+                            <div style="margin-top: 15px;">
+                                <button class="tab-btn" style="display: inline-flex; margin: 0 auto; padding: 8px 16px; font-size: 13px;" onclick="restartClient()">
+                                    🔄 Gerar Novo Código QR
+                                </button>
                             </div>
                         `;
                     } else {
@@ -981,6 +986,17 @@
         } catch (e) {
             console.error('Error checking status:', e);
             setTimeout(checkStatus, 5000);
+        }
+    }
+
+    // Force restart WhatsApp client
+    async function restartClient() {
+        showToast('A reiniciar conexão do WhatsApp...');
+        try {
+            await fetch('/api/restart', { method: 'POST' });
+            setTimeout(checkStatus, 2000);
+        } catch (e) {
+            showToast('Erro ao reiniciar.');
         }
     }
 

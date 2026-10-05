@@ -118,11 +118,15 @@ function getMessageMediaForFile(filePath) {
     return new MessageMedia(mimetype, base64Data, filename);
 }
 
-async function safeDestroyClient() {
+function clearLandingBypass() {
     if (landingBypassInterval) {
         clearInterval(landingBypassInterval);
         landingBypassInterval = null;
     }
+}
+
+async function safeDestroyClient() {
+    clearLandingBypass();
     console.log('Safely destroying WhatsApp client...');
     
     // Force kill the Chrome child process if it exists to release file locks
@@ -188,41 +192,65 @@ function initWhatsAppClient() {
     currentQR = '';
     let readyTimestamp = Math.floor(Date.now() / 1000);
 
+    const isWindows = process.platform === 'win32';
+    // User-Agent must strictly match host OS platform to avoid WhatsApp anti-bot session rejection after scan
+    const userAgent = isWindows
+        ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
+        : 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
+
+    const puppeteerArgs = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--disable-gpu',
+        '--disable-extensions',
+        '--disable-software-rasterizer',
+        '--disable-blink-features=AutomationControlled',
+        `--user-agent=${userAgent}`
+    ];
+
+    if (!isWindows) {
+        // Essential low-memory args for cloud containers (Render 512MB RAM limit)
+        puppeteerArgs.push(
+            '--no-zygote',
+            '--disable-background-networking',
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-breakpad',
+            '--disable-component-update',
+            '--disable-renderer-backgrounding',
+            '--js-flags=--max-old-space-size=300'
+        );
+    }
+
     const puppeteerOpts = {
         headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--disable-gpu',
-            '--disable-extensions',
-            '--disable-software-rasterizer',
-            '--disable-blink-features=AutomationControlled',
-            '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
-        ]
+        args: puppeteerArgs
     };
 
-    if (process.platform === 'win32') {
+    if (isWindows) {
         puppeteerOpts.channel = 'chrome';
         console.log('Windows detected: Using system Chrome channel for full media codec support.');
     } else {
         puppeteerOpts.executablePath = getChromiumPath();
         console.log('Linux/Other detected: Using detected Chromium path:', puppeteerOpts.executablePath);
     }
-    
-
 
     client = new Client({
         authStrategy: new LocalAuth(),
-        puppeteer: puppeteerOpts
+        puppeteer: puppeteerOpts,
+        authTimeoutMs: 180000, // 3 minutes timeout so cloud containers have plenty of time to sync chats
+        qrMaxRetries: 5,
+        takeoverOnConflict: true,
+        takeoverTimeoutMs: 0
     });
 
-    // Periodically check and bypass the interstitial landing page "Continue to WhatsApp Web"
-    if (landingBypassInterval) clearInterval(landingBypassInterval);
+    // Interstitial landing bypass - only active during initial load before QR is received
+    clearLandingBypass();
     landingBypassInterval = setInterval(async () => {
-        if (client && client.pupPage && initStatus !== 'ready') {
+        if (client && client.pupPage && initStatus === 'initializing') {
             try {
                 const buttons = await client.pupPage.$$('button, a, div[role="button"]');
                 for (const button of buttons) {
@@ -236,10 +264,13 @@ function initWhatsAppClient() {
             } catch (err) {
                 // Ignore evaluation errors during reload or initialization
             }
+        } else if (initStatus !== 'initializing') {
+            clearLandingBypass();
         }
-    }, 5000);
+    }, 4000);
 
     client.on('qr', (qr) => {
+        clearLandingBypass();
         console.log('QR Code generated. Please scan to authenticate.');
         initStatus = 'waiting_qr';
         qrcode.toDataURL(qr, (err, url) => {
@@ -252,44 +283,58 @@ function initWhatsAppClient() {
     });
 
     client.on('ready', () => {
+        clearLandingBypass();
         console.log('Client is ready!');
         clientReady = true;
         currentQR = '';
         initStatus = 'ready';
         initError = '';
         readyTimestamp = Math.floor(Date.now() / 1000);
-        if (landingBypassInterval) {
-            clearInterval(landingBypassInterval);
-            landingBypassInterval = null;
-        }
     });
 
     client.on('authenticated', () => {
+        clearLandingBypass();
         console.log('Authenticated successfully!');
         initStatus = 'authenticated';
         currentQR = '';
+        initError = 'Autenticado com sucesso! Sincronizando dados...';
     });
 
     client.on('loading_screen', (percent, message) => {
+        clearLandingBypass();
         console.log(`WhatsApp Web Loading: ${percent}% - ${message}`);
         initStatus = 'loading';
-        initError = `Sincronizando WhatsApp (${percent}%)...`;
+        initError = `Sincronizando WhatsApp (${percent}%)... ${message || ''}`;
     });
 
     client.on('auth_failure', (msg) => {
+        clearLandingBypass();
         console.error('Authentication failed:', msg);
         clientReady = false;
         initStatus = 'error';
-        initError = 'Authentication failed: ' + (msg || 'Check details.');
+        initError = 'Falha na autenticação: ' + (msg || 'Tente escanear novamente.');
     });
 
     client.on('disconnected', async (reason) => {
+        clearLandingBypass();
         console.log('Client disconnected:', reason);
         clientReady = false;
         currentQR = '';
         initStatus = 'disconnected';
+        initError = `Desconectado (${reason || 'Sessão encerrada'}). A reiniciar...`;
         await safeDestroyClient();
-        setTimeout(() => { initWhatsAppClient(); }, 3000);
+        if (reason === 'LOGOUT') {
+            try {
+                const sessionPath = path.join(__dirname, '.wwebjs_auth');
+                if (fs.existsSync(sessionPath)) {
+                    fs.rmSync(sessionPath, { recursive: true, force: true });
+                    console.log('Cleaned up session folder after LOGOUT.');
+                }
+            } catch (e) {
+                console.error('Error cleaning session folder:', e.message);
+            }
+        }
+        setTimeout(() => { initWhatsAppClient(); }, 4000);
     });
 
     client.on('message', async msg => {
@@ -534,6 +579,15 @@ app.post('/api/disconnect', async (req, res) => {
             }
             await safeDestroyClient();
         }
+        try {
+            const sessionPath = path.join(__dirname, '.wwebjs_auth');
+            if (fs.existsSync(sessionPath)) {
+                fs.rmSync(sessionPath, { recursive: true, force: true });
+                console.log('Cleaned session folder on explicit disconnect.');
+            }
+        } catch (e) {
+            console.error('Non-critical: error cleaning session folder:', e.message);
+        }
         initStatus = 'disconnected';
         currentQR = '';
         initError = '';
@@ -541,6 +595,23 @@ app.post('/api/disconnect', async (req, res) => {
     } catch (err) {
         console.error('Error during client disconnection:', err);
         res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+app.post('/api/restart', async (req, res) => {
+    try {
+        console.log('Restart requested via API...');
+        await safeDestroyClient();
+        try {
+            const sessionPath = path.join(__dirname, '.wwebjs_auth');
+            if (fs.existsSync(sessionPath)) {
+                fs.rmSync(sessionPath, { recursive: true, force: true });
+            }
+        } catch (e) {}
+        setTimeout(() => { initWhatsAppClient(); }, 2000);
+        res.json({ success: true, message: 'Restarting...' });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
 });
 
