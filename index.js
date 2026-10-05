@@ -1,3 +1,10 @@
+// Patch whatsapp-web.js ready timeout and injection resilience before import
+try {
+    require('./patch-wwebjs');
+} catch (e) {
+    console.error('Non-critical: error running patch-wwebjs:', e.message);
+}
+
 const express = require('express');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
@@ -239,6 +246,7 @@ function initWhatsAppClient() {
         // Essential low-memory args for cloud containers (Render 512MB RAM limit)
         puppeteerArgs.push(
             '--no-zygote',
+            '--single-process',
             '--password-store=basic',
             '--use-mock-keychain',
             '--disable-background-networking',
@@ -247,7 +255,7 @@ function initWhatsAppClient() {
             '--disable-breakpad',
             '--disable-component-update',
             '--disable-renderer-backgrounding',
-            '--js-flags=--max-old-space-size=300'
+            '--js-flags=--max-old-space-size=256'
         );
     }
 
@@ -267,6 +275,7 @@ function initWhatsAppClient() {
     client = new Client({
         authStrategy: new LocalAuth(),
         puppeteer: puppeteerOpts,
+        webVersionCache: { type: 'none' }, // Always load genuine live WhatsApp Web, bypass stale cache
         authTimeoutMs: 180000, // 3 minutes timeout so cloud containers have plenty of time to sync chats
         qrMaxRetries: 5,
         takeoverOnConflict: true,
