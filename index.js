@@ -140,7 +140,7 @@ async function safeDestroyClient() {
         }
     }
     
-    // Proactively kill any zombie Chrome processes tied to our session dir on Windows
+    // Proactively kill any zombie Chrome processes tied to our session dir
     if (process.platform === 'win32') {
         try {
             console.log('Force killing any zombie Chrome processes holding locks on the session directory...');
@@ -149,6 +149,14 @@ async function safeDestroyClient() {
             console.log('Zombie Chrome processes killed successfully.');
         } catch (e) {
             console.log('Non-critical: Error killing zombie Chrome processes:', e.message);
+        }
+    } else {
+        try {
+            console.log('Killing any zombie Chromium processes on Linux...');
+            execSync('pkill -9 -f chromium || pkill -9 -f chrome || true', { stdio: 'ignore' });
+            console.log('Zombie Chromium processes killed successfully.');
+        } catch (e) {
+            console.log('Non-critical: Error killing zombie processes on Linux:', e.message);
         }
     }
     
@@ -171,17 +179,33 @@ function initWhatsAppClient() {
         return;
     }
 
-    // Clean up zombie locks before launching Chrome to prevent launch timeouts
+    // Clean up zombie locks and processes before launching Chrome to prevent launch timeouts or SingletonLock errors
+    if (process.platform !== 'win32') {
+        try {
+            execSync('pkill -9 -f chromium || pkill -9 -f chrome || true', { stdio: 'ignore' });
+        } catch (e) {}
+    }
+
     try {
         const sessionPath = path.join(__dirname, '.wwebjs_auth', 'session');
-        const lockFile = path.join(sessionPath, 'lockfile');
-        const devtoolsPort = path.join(sessionPath, 'DevToolsActivePort');
-        const profileLock = path.join(sessionPath, 'Default', 'LOCK');
+        const lockNames = [
+            'lockfile',
+            'DevToolsActivePort',
+            'SingletonLock',
+            'SingletonCookie',
+            'SingletonSocket',
+            path.join('Default', 'LOCK')
+        ];
         
-        if (fs.existsSync(lockFile)) fs.rmSync(lockFile, { force: true });
-        if (fs.existsSync(devtoolsPort)) fs.rmSync(devtoolsPort, { force: true });
-        if (fs.existsSync(profileLock)) fs.rmSync(profileLock, { force: true });
-        console.log('Cleaned up Chrome lock files successfully.');
+        for (const name of lockNames) {
+            const p = path.join(sessionPath, name);
+            if (fs.existsSync(p)) {
+                try {
+                    fs.rmSync(p, { force: true, recursive: true });
+                } catch (e) {}
+            }
+        }
+        console.log('Cleaned up Chrome lock & Singleton files successfully.');
     } catch (err) {
         console.error('Non-critical: Error cleaning lock files on startup:', err.message);
     }
@@ -215,6 +239,8 @@ function initWhatsAppClient() {
         // Essential low-memory args for cloud containers (Render 512MB RAM limit)
         puppeteerArgs.push(
             '--no-zygote',
+            '--password-store=basic',
+            '--use-mock-keychain',
             '--disable-background-networking',
             '--disable-background-timer-throttling',
             '--disable-backgrounding-occluded-windows',
