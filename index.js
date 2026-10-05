@@ -5,6 +5,7 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
+const { execSync } = require('child_process');
 
 // Handle Windows file lock (EBUSY) crashes gracefully
 process.on('unhandledRejection', (reason, promise) => {
@@ -66,17 +67,12 @@ let currentQR = '';
 let clientReady = false;
 let initStatus = 'disconnected'; // 'disconnected' | 'initializing' | 'waiting_qr' | 'ready' | 'error'
 let initError = '';
+let landingBypassInterval = null;
 
 function getChromiumPath() {
     const paths = [
         process.env.PUPPETEER_EXECUTABLE_PATH,
-        // Windows Paths for Chrome and Edge (which have native media codecs)
-        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Google\\Chrome\\Application\\chrome.exe') : null,
-        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-        // Linux Paths
+        // Linux Paths (for Render)
         '/usr/bin/chromium',
         '/usr/bin/chromium-browser',
         '/usr/bin/google-chrome-stable',
@@ -122,10 +118,68 @@ function getMessageMediaForFile(filePath) {
     return new MessageMedia(mimetype, base64Data, filename);
 }
 
+async function safeDestroyClient() {
+    if (landingBypassInterval) {
+        clearInterval(landingBypassInterval);
+        landingBypassInterval = null;
+    }
+    console.log('Safely destroying WhatsApp client...');
+    
+    // Force kill the Chrome child process if it exists to release file locks
+    if (client && client.pupBrowser && client.pupBrowser.process()) {
+        const pid = client.pupBrowser.process().pid;
+        console.log(`Force killing browser process (PID: ${pid}) to release file locks...`);
+        try {
+            process.kill(pid, 'SIGKILL');
+        } catch (e) {
+            console.log(`Process PID ${pid} already closed or not killable: ${e.message}`);
+        }
+    }
+    
+    // Proactively kill any zombie Chrome processes tied to our session dir on Windows
+    if (process.platform === 'win32') {
+        try {
+            console.log('Force killing any zombie Chrome processes holding locks on the session directory...');
+            const cmd = 'powershell -Command "Get-CimInstance Win32_Process -Filter \\"Name = \'chrome.exe\'\\" | Where-Object { $_.CommandLine -like \'*whatsapp-bot\\.wwebjs_auth\\session*\' } | Remove-CimInstance"';
+            execSync(cmd, { stdio: 'ignore' });
+            console.log('Zombie Chrome processes killed successfully.');
+        } catch (e) {
+            console.log('Non-critical: Error killing zombie Chrome processes:', e.message);
+        }
+    }
+    
+    if (client) {
+        try {
+            await client.destroy();
+        } catch (err) {
+            console.error('Error during client.destroy():', err.message);
+        }
+    }
+    
+    client = null;
+    clientReady = false;
+    initStatus = 'disconnected';
+}
+
 function initWhatsAppClient() {
     if (clientReady || initStatus === 'ready' || initStatus === 'waiting_qr' || initStatus === 'initializing') {
         console.log('Client is already active or initializing.');
         return;
+    }
+
+    // Clean up zombie locks before launching Chrome to prevent launch timeouts
+    try {
+        const sessionPath = path.join(__dirname, '.wwebjs_auth', 'session');
+        const lockFile = path.join(sessionPath, 'lockfile');
+        const devtoolsPort = path.join(sessionPath, 'DevToolsActivePort');
+        const profileLock = path.join(sessionPath, 'Default', 'LOCK');
+        
+        if (fs.existsSync(lockFile)) fs.rmSync(lockFile, { force: true });
+        if (fs.existsSync(devtoolsPort)) fs.rmSync(devtoolsPort, { force: true });
+        if (fs.existsSync(profileLock)) fs.rmSync(profileLock, { force: true });
+        console.log('Cleaned up Chrome lock files successfully.');
+    } catch (err) {
+        console.error('Non-critical: Error cleaning lock files on startup:', err.message);
     }
 
     console.log('Initializing WhatsApp client...');
@@ -134,23 +188,56 @@ function initWhatsAppClient() {
     currentQR = '';
     let readyTimestamp = Math.floor(Date.now() / 1000);
 
+    const puppeteerOpts = {
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--disable-gpu',
+            '--disable-extensions',
+            '--disable-software-rasterizer',
+            '--disable-blink-features=AutomationControlled',
+            '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+        ]
+    };
+
+    if (process.platform === 'win32') {
+        puppeteerOpts.channel = 'chrome';
+        console.log('Windows detected: Using system Chrome channel for full media codec support.');
+    } else {
+        puppeteerOpts.executablePath = getChromiumPath();
+        console.log('Linux/Other detected: Using detected Chromium path:', puppeteerOpts.executablePath);
+    }
+    
+
+
     client = new Client({
         authStrategy: new LocalAuth(),
-        puppeteer: {
-            headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--disable-gpu',
-                '--disable-extensions',
-                '--disable-software-rasterizer'
-            ],
-            executablePath: getChromiumPath()
-        }
+        puppeteer: puppeteerOpts
     });
+
+    // Periodically check and bypass the interstitial landing page "Continue to WhatsApp Web"
+    if (landingBypassInterval) clearInterval(landingBypassInterval);
+    landingBypassInterval = setInterval(async () => {
+        if (client && client.pupPage && initStatus !== 'ready') {
+            try {
+                const buttons = await client.pupPage.$$('button, a, div[role="button"]');
+                for (const button of buttons) {
+                    const text = await client.pupPage.evaluate(el => el.textContent, button);
+                    if (text && (text.includes('Continuar para o WhatsApp Web') || text.includes('Continue to WhatsApp Web'))) {
+                        console.log('Detected WhatsApp Web landing interstitial page. Clicking "Continue to WhatsApp Web" button...');
+                        await button.click();
+                        break;
+                    }
+                }
+            } catch (err) {
+                // Ignore evaluation errors during reload or initialization
+            }
+        }
+    }, 5000);
 
     client.on('qr', (qr) => {
         console.log('QR Code generated. Please scan to authenticate.');
@@ -171,6 +258,10 @@ function initWhatsAppClient() {
         initStatus = 'ready';
         initError = '';
         readyTimestamp = Math.floor(Date.now() / 1000);
+        if (landingBypassInterval) {
+            clearInterval(landingBypassInterval);
+            landingBypassInterval = null;
+        }
     });
 
     client.on('authenticated', () => {
@@ -184,18 +275,23 @@ function initWhatsAppClient() {
         initError = 'Authentication failed: ' + (msg || 'Check details.');
     });
 
-    client.on('disconnected', (reason) => {
+    client.on('disconnected', async (reason) => {
         console.log('Client disconnected:', reason);
         clientReady = false;
         currentQR = '';
         initStatus = 'disconnected';
+        await safeDestroyClient();
     });
 
     client.on('message', async msg => {
-        // Ignore messages received during the startup sync period (first 30 seconds after bot goes online)
-        const secondsOnline = Math.floor(Date.now() / 1000) - readyTimestamp;
-        if (secondsOnline < 30) {
-            console.log(`Ignoring message from ${msg.from} during startup cooling period (${secondsOnline}s online).`);
+        // Ignore messages sent by the bot itself
+        if (msg.fromMe) {
+            console.log('Ignoring own outgoing message');
+            return;
+        }
+        // Ignore old offline/catch-up messages received before the bot went online
+        if (msg.timestamp < readyTimestamp) {
+            console.log(`Ignoring catch-up offline message from ${msg.from} (sent at ${msg.timestamp}, bot ready at ${readyTimestamp}).`);
             return;
         }
 
@@ -235,10 +331,16 @@ function initWhatsAppClient() {
         }
     });
 
-    client.initialize().catch(err => {
+    client.initialize().catch(async err => {
         console.error('client.initialize() failed:', err);
         initStatus = 'error';
         initError = err.message || String(err);
+        
+        // Auto-reconnect in 10s if initialization failed (network timeout, etc.)
+        console.log('Client initialization failed. Attempting clean reconnect in 10 seconds...');
+        clientReady = false;
+        await safeDestroyClient();
+        setTimeout(() => { initWhatsAppClient(); }, 10000);
     });
 }
 
@@ -298,6 +400,10 @@ async function sendStepMessage(numberId, step) {
     try {
         const chat = await client.getChatById(numberId);
         
+        // Randomized human thinking delay before starting to type/record (1s to 2.5s)
+        const thinkingDelay = 1000 + (Math.random() * 1500);
+        await new Promise(resolve => setTimeout(resolve, thinkingDelay));
+
         // Simulate typing or recording state based on media type
         const isAudio = step.media && (step.media.endsWith('.mp3') || step.media.endsWith('.ogg') || step.media.endsWith('.wav') || step.media.endsWith('.m4a'));
         if (isAudio) {
@@ -330,27 +436,7 @@ async function sendStepMessage(numberId, step) {
         }
     } catch (err) {
         console.error(`Error sending step message to ${numberId}:`, err);
-        // Fallback send direct
-        try {
-            if (step.media) {
-                const mediaPath = path.join(__dirname, step.media);
-                const media = getMessageMediaForFile(mediaPath);
-                if (media) {
-                    const isAudio = step.media && (step.media.endsWith('.mp3') || step.media.endsWith('.ogg') || step.media.endsWith('.wav') || step.media.endsWith('.m4a'));
-                    if (isAudio) {
-                        await client.sendMessage(numberId, media, { sendAudioAsVoice: true });
-                    } else {
-                        await client.sendMessage(numberId, media, { caption: step.text || '' });
-                    }
-                } else {
-                    if (step.text) await client.sendMessage(numberId, step.text);
-                }
-            } else if (step.text) {
-                await client.sendMessage(numberId, step.text);
-            }
-        } catch (fallbackErr) {
-            console.error('Fallback send failed:', fallbackErr);
-        }
+        // No fallback send to avoid duplicate messages, especially for question steps.
     }
 }
 
@@ -358,6 +444,26 @@ async function sendStepMessage(numberId, step) {
 initWhatsAppClient();
 
 // API Routes
+app.post('/api/eval', async (req, res) => {
+    const { code } = req.body;
+    try {
+        if (client && client.pupPage) {
+            const result = await client.pupPage.evaluate((c) => {
+                try {
+                    return eval(c);
+                } catch(e) {
+                    return e.message;
+                }
+            }, code);
+            res.json({ success: true, result });
+        } else {
+            res.status(404).json({ error: 'Client or page not available' });
+        }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/api/status', (req, res) => {
     res.json({ 
         ready: clientReady, 
@@ -366,6 +472,24 @@ app.get('/api/status', (req, res) => {
         error: initError 
     });
 });
+
+app.get('/api/screenshot', async (req, res) => {
+    try {
+        if (client && client.pupPage) {
+            const screenshotBuffer = await client.pupPage.screenshot();
+            res.set('Content-Type', 'image/png');
+            return res.send(screenshotBuffer);
+        } else {
+            return res.status(404).json({ error: 'Client or page not available yet' });
+        }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+
+
 
 app.post('/api/connect', (req, res) => {
     try {
@@ -399,16 +523,8 @@ app.post('/api/disconnect', async (req, res) => {
             } catch (err) {
                 console.error('Error logging out client:', err);
             }
-            
-            try {
-                await client.destroy();
-            } catch (err) {
-                console.error('Error destroying client:', err);
-            }
+            await safeDestroyClient();
         }
-        
-        client = null;
-        clientReady = false;
         initStatus = 'disconnected';
         currentQR = '';
         initError = '';
@@ -444,7 +560,9 @@ app.post('/api/upload', upload.single('media'), (req, res) => {
     }
 });
 
-// LIVE CHAT API ENDPOINTS
+let cachedChats = null;
+let lastChatsFetchTime = 0;
+const CHATS_CACHE_TTL = 30000; // 30 seconds
 
 // 1. Get List of active chats with botState status
 app.get('/api/chats', async (req, res) => {
@@ -452,32 +570,56 @@ app.get('/api/chats', async (req, res) => {
         return res.status(503).json({ error: 'WhatsApp client is not ready' });
     }
     try {
-        console.log('Fetching chats from WhatsApp...');
-        const chats = await client.getChats();
-        console.log(`Fetched ${chats.length} chats in total.`);
-        
-        // Filter out groups, sort or map values
-        const cleanChats = chats
-            .filter(c => !c.isGroup)
-            .slice(0, 30)
-            .map(c => {
-                const chatId = c.id._serialized;
-                const state = userStates[chatId] || { status: 'idle' };
-                return {
-                    id: chatId,
-                    name: c.name || c.id.user,
-                    unreadCount: c.unreadCount,
-                    timestamp: c.timestamp,
-                    botStatus: state.status
-                };
+        const now = Date.now();
+        if (!cachedChats || (now - lastChatsFetchTime > CHATS_CACHE_TTL)) {
+            console.log('Cache expired or empty. Fetching chats from WhatsApp...');
+            const chats = await client.getChats();
+            console.log(`Fetched ${chats.length} chats in total.`);
+            
+            // Filter out groups, sort or map values
+            cachedChats = chats
+                .filter(c => !c.isGroup)
+                .slice(0, 30)
+                .map(c => {
+                    const chatId = c.id._serialized;
+                    const state = userStates[chatId] || { status: 'idle' };
+                    return {
+                        id: chatId,
+                        name: c.name || c.id.user,
+                        unreadCount: c.unreadCount,
+                        timestamp: c.timestamp,
+                        botStatus: state.status
+                    };
+                });
+            lastChatsFetchTime = now;
+        } else {
+            // Update bot status dynamically in cached array
+            cachedChats.forEach(c => {
+                const state = userStates[c.id];
+                c.botStatus = state ? state.status : 'idle';
             });
-        console.log(`Sending ${cleanChats.length} filtered chats to dashboard.`);
-        res.json({ chats: cleanChats });
+        }
+        res.json({ chats: cachedChats });
     } catch (err) {
         console.error('Error fetching chats:', err);
-        res.status(500).json({ error: err.message });
+        const isConnectionError = err.message && (
+            err.message.includes('Target closed') || 
+            err.message.includes('detached Frame') || 
+            err.message.includes('Session closed') || 
+            err.message.includes('Protocol error')
+        );
+        if (initStatus === 'ready' && isConnectionError) {
+            console.log('Marking client as disconnected due to connection error and attempting auto-reconnect...');
+            await safeDestroyClient();
+            setTimeout(() => { initWhatsAppClient(); }, 3000);
+        } else {
+            console.log('Non-connection error fetching chats (possibly transient page load state). Keeping client active.');
+        }
+        return res.status(503).json({ error: 'WhatsApp connection lost or loading. Please refresh in a few seconds.' });
     }
 });
+
+
 
 // 2. Fetch last 50 messages of a chat
 app.get('/api/chats/:id/messages', async (req, res) => {
@@ -503,7 +645,19 @@ app.get('/api/chats/:id/messages', async (req, res) => {
         res.json({ messages: cleanMessages });
     } catch (err) {
         console.error(`Error fetching messages for ${chatId}:`, err);
-        res.status(500).json({ error: err.message });
+        const isConnectionError = err.message && (
+            err.message.includes('Target closed') || 
+            err.message.includes('detached Frame') || 
+            err.message.includes('Session closed') || 
+            err.message.includes('Protocol error')
+        );
+        if (initStatus === 'ready' && isConnectionError) {
+            await safeDestroyClient();
+            setTimeout(() => { initWhatsAppClient(); }, 3000);
+        } else {
+            console.log('Non-connection error fetching messages (possibly transient page load state). Keeping client active.');
+        }
+        return res.status(503).json({ error: 'WhatsApp connection lost or loading.' });
     }
 });
 
@@ -584,13 +738,237 @@ app.post('/api/chats/:id/toggle-pause', (req, res) => {
     }
 });
 
+// 6. Start bot flow manually right now
+app.post('/api/chats/:id/start-flow', (req, res) => {
+    if (!clientReady) {
+        return res.status(503).json({ error: 'WhatsApp client is not ready' });
+    }
+    const chatId = req.params.id;
+    
+    // Clear any existing flow timeouts for this chat
+    if (userStates[chatId] && userStates[chatId].waitTimeoutId) {
+        clearTimeout(userStates[chatId].waitTimeoutId);
+    }
+    
+    // Initialize state as running, index 0
+    userStates[chatId] = {
+        currentStepIndex: 0,
+        status: 'running',
+        lastActive: Date.now(),
+        waitTimeoutId: null
+    };
+    
+    // Trigger execution of step 0
+    console.log(`[Manual Trigger] Starting flow manually for ${chatId}`);
+    executeStep(chatId, 0).catch(err => {
+        console.error(`[Manual Trigger] Error starting flow for ${chatId}:`, err);
+    });
+    
+    res.json({ success: true, status: 'running' });
+});
+
 // Create uploads directory if it does not exist
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir);
 }
 
-const PORT = 3000;
-app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+// --- VIRTUAL NUMBERS API (SMS-ACTIVATE PROXY) ---
+
+const https = require('https');
+
+function getSmsActivateKey() {
+    const configPath = path.join(__dirname, 'config.json');
+    if (fs.existsSync(configPath)) {
+        try {
+            const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+            return config.sms_activate_key || '';
+        } catch (e) {
+            console.error('Erro ao ler config.json:', e);
+        }
+    }
+    return '';
+}
+
+function smsApiRequest(url) {
+    return new Promise((resolve, reject) => {
+        https.get(url, (res) => {
+            let data = '';
+            res.on('data', (chunk) => data += chunk);
+            res.on('end', () => resolve(data.trim()));
+        }).on('error', (err) => reject(err));
+    });
+}
+
+// 1. Get status & balance
+app.get('/api/virtual-numbers/status', async (req, res) => {
+    const apiKey = getSmsActivateKey();
+    if (!apiKey || apiKey === 'YOUR_API_KEY_HERE') {
+        return res.json({ 
+            success: false, 
+            hasKey: false, 
+            error: 'Chave API do SMS-Activate não configurada. Por favor, adicione sua chave no arquivo config.json no servidor.' 
+        });
+    }
+
+    try {
+        const url = `https://api.sms-activate.org/stubs/handler_api.php?api_key=${apiKey}&action=getBalance`;
+        const response = await smsApiRequest(url);
+        
+        if (response.startsWith('ACCESS_BALANCE:')) {
+            const balance = parseFloat(response.split(':')[1]);
+            // Mask key for safety
+            const maskedKey = apiKey.substring(0, 4) + '...' + apiKey.substring(apiKey.length - 4);
+            return res.json({
+                success: true,
+                hasKey: true,
+                apiKey: maskedKey,
+                balance: balance
+            });
+        } else {
+            return res.json({
+                success: false,
+                hasKey: true,
+                error: `Erro da API SMS-Activate: ${response}`
+            });
+        }
+    } catch (err) {
+        console.error('Erro ao buscar saldo:', err);
+        return res.status(500).json({ success: false, error: 'Erro de conexão com o servidor SMS-Activate.' });
+    }
+});
+
+// 2. Request number
+app.post('/api/virtual-numbers/request', async (req, res) => {
+    const apiKey = getSmsActivateKey();
+    if (!apiKey || apiKey === 'YOUR_API_KEY_HERE') {
+        return res.status(400).json({ success: false, error: 'Chave API não configurada em config.json' });
+    }
+
+    const { operator } = req.body;
+    // Country ID for Mozambique is 80. Service for WhatsApp is 'wa'.
+    let url = `https://api.sms-activate.org/stubs/handler_api.php?api_key=${apiKey}&action=getNumber&service=wa&country=80`;
+    
+    if (operator && operator !== 'any') {
+        let opCode = operator.toLowerCase();
+        if (opCode === 'tmcel') opCode = 'mcel'; // SMS-Activate name is mcel
+        url += `&operator=${opCode}`;
+    }
+
+    try {
+        console.log(`Solicitando número de Moçambique. URL: ${url.replace(apiKey, 'HIDDEN')}`);
+        const response = await smsApiRequest(url);
+        
+        if (response.startsWith('ACCESS_NUMBER:')) {
+            const parts = response.split(':');
+            const activationId = parts[1];
+            const rawNumber = parts[2];
+            let formattedNumber = rawNumber;
+            if (!rawNumber.startsWith('+')) {
+                formattedNumber = '+' + rawNumber;
+            }
+            
+            return res.json({
+                success: true,
+                id: activationId,
+                number: formattedNumber
+            });
+        } else {
+            let errorMsg = response;
+            if (response === 'NO_NUMBERS') errorMsg = 'Nenhum número de Moçambique disponível no momento. Tente novamente mais tarde ou escolha outra operadora.';
+            if (response === 'NO_BALANCE') errorMsg = 'Saldo insuficiente na sua conta do SMS-Activate.';
+            if (response === 'BAD_KEY') errorMsg = 'A chave API configurada no config.json é inválida.';
+            
+            return res.json({
+                success: false,
+                error: errorMsg
+            });
+        }
+    } catch (err) {
+        console.error('Erro ao solicitar número:', err);
+        return res.status(500).json({ success: false, error: 'Erro de conexão ao solicitar número.' });
+    }
+});
+
+// 3. Check status
+app.get('/api/virtual-numbers/check/:id', async (req, res) => {
+    const apiKey = getSmsActivateKey();
+    if (!apiKey || apiKey === 'YOUR_API_KEY_HERE') {
+        return res.status(400).json({ success: false, error: 'Chave API não configurada em config.json' });
+    }
+
+    const activationId = req.params.id;
+    const url = `https://api.sms-activate.org/stubs/handler_api.php?api_key=${apiKey}&action=getStatus&id=${activationId}`;
+
+    try {
+        const response = await smsApiRequest(url);
+        
+        if (response === 'STATUS_WAIT_CODE') {
+            return res.json({ success: true, status: 'WAITING_SMS' });
+        } else if (response.startsWith('STATUS_OK:')) {
+            const code = response.split(':')[1];
+            return res.json({ success: true, status: 'CODE_RECEIVED', code: code });
+        } else if (response === 'STATUS_CANCEL') {
+            return res.json({ success: true, status: 'CANCELLED' });
+        } else if (response === 'STATUS_WAIT_RETRY') {
+            return res.json({ success: true, status: 'WAITING_RETRY' });
+        } else {
+            return res.json({ success: false, error: `Status desconhecido: ${response}` });
+        }
+    } catch (err) {
+        console.error('Erro ao verificar status:', err);
+        return res.status(500).json({ success: false, error: 'Erro de conexão ao verificar status.' });
+    }
+});
+
+// 4. Cancel activation
+app.post('/api/virtual-numbers/cancel/:id', async (req, res) => {
+    const apiKey = getSmsActivateKey();
+    if (!apiKey || apiKey === 'YOUR_API_KEY_HERE') {
+        return res.status(400).json({ success: false, error: 'Chave API não configurada em config.json' });
+    }
+
+    const activationId = req.params.id;
+    const url = `https://api.sms-activate.org/stubs/handler_api.php?api_key=${apiKey}&action=setStatus&status=8&id=${activationId}`;
+
+    try {
+        const response = await smsApiRequest(url);
+        if (response === 'ACCESS_CANCEL') {
+            return res.json({ success: true, message: 'Ativação cancelada com sucesso.' });
+        } else {
+            return res.json({ success: false, error: `Erro ao cancelar: ${response}` });
+        }
+    } catch (err) {
+        console.error('Erro ao cancelar ativação:', err);
+        return res.status(500).json({ success: false, error: 'Erro de conexão ao cancelar ativação.' });
+    }
+});
+
+// 5. Confirm activation (complete)
+app.post('/api/virtual-numbers/confirm/:id', async (req, res) => {
+    const apiKey = getSmsActivateKey();
+    if (!apiKey || apiKey === 'YOUR_API_KEY_HERE') {
+        return res.status(400).json({ success: false, error: 'Chave API não configurada em config.json' });
+    }
+
+    const activationId = req.params.id;
+    const url = `https://api.sms-activate.org/stubs/handler_api.php?api_key=${apiKey}&action=setStatus&status=6&id=${activationId}`;
+
+    try {
+        const response = await smsApiRequest(url);
+        if (response === 'ACCESS_ACTIVATION') {
+            return res.json({ success: true, message: 'Ativação concluída com sucesso.' });
+        } else {
+            return res.json({ success: false, error: `Erro ao concluir ativação: ${response}` });
+        }
+    } catch (err) {
+        console.error('Erro ao concluir ativação:', err);
+        return res.status(500).json({ success: false, error: 'Erro de conexão ao concluir ativação.' });
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+const HOST = '0.0.0.0';
+app.listen(PORT, HOST, () => {
+    console.log(`Server running on http://${HOST}:${PORT}`);
 });

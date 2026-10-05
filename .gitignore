@@ -1,5 +1,8 @@
 node_modules/
 .wwebjs_auth/
 .wwebjs_cache/
-uploads/
-npm-debug.log
+session_data/
+scratch/
+*.log
+public/*.png
+config.json
