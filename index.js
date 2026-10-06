@@ -202,20 +202,28 @@ async function initWhatsApp() {
                     continue;
                 }
 
-                // Extract message body text
+                // Extract message body text or media type
                 const text = msg.message?.conversation ||
                              msg.message?.extendedTextMessage?.text ||
                              msg.message?.imageMessage?.caption ||
                              msg.message?.videoMessage?.caption || '';
 
-                console.log(`[Baileys Incoming] ${jid}: "${text}"`);
+                const incomingContent = text || (
+                    msg.message?.audioMessage ? '[Áudio recebido]' :
+                    msg.message?.imageMessage ? '[Imagem recebida]' :
+                    msg.message?.videoMessage ? '[Vídeo recebido]' :
+                    msg.message?.documentMessage ? '[Documento recebido]' :
+                    msg.message?.stickerMessage ? '[Figurinha]' : '[Mensagem]'
+                );
+
+                console.log(`[Baileys Incoming] ${jid}: "${text || incomingContent}"`);
 
                 // Save to live chat history
-                recordIncomingMessage(jid, text, msg);
+                recordIncomingMessage(jid, text || incomingContent, msg);
 
                 // Handle automated flow execution
                 if (clientReady) {
-                    handleFlowForUser(jid, text);
+                    await handleFlowForUser(jid, text || incomingContent);
                 }
             }
         });
@@ -229,9 +237,51 @@ async function initWhatsApp() {
     }
 }
 
-// User Flow Execution State
-const userStates = {}; // { jid: { currentStepIndex, status: 'running'|'waiting_reply'|'completed'|'paused', lastActive, waitTimeoutId } }
-const SESSION_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+// User Flow Execution State & Disk Persistence
+const STATES_FILE = path.join(__dirname, 'user_states.json');
+let userStates = {}; // { jid: { currentStepIndex, status: 'running'|'waiting_reply'|'sending_question'|'completed'|'paused', lastActive, answers: {}, pendingReply: null, waitTimeoutId: null } }
+const userLocks = new Set(); // Prevent concurrent step execution for same jid
+
+function loadUserStates() {
+    if (fs.existsSync(STATES_FILE)) {
+        try {
+            const raw = JSON.parse(fs.readFileSync(STATES_FILE, 'utf-8'));
+            for (const jid in raw) {
+                userStates[jid] = {
+                    currentStepIndex: typeof raw[jid].currentStepIndex === 'number' ? raw[jid].currentStepIndex : 0,
+                    status: raw[jid].status || 'running',
+                    lastActive: raw[jid].lastActive || Date.now(),
+                    answers: raw[jid].answers || {},
+                    pendingReply: null,
+                    waitTimeoutId: null
+                };
+            }
+            console.log(`[Baileys Flow] Carregados ${Object.keys(userStates).length} estados de utilizadores de user_states.json.`);
+        } catch (e) {
+            console.error('Error loading user_states.json:', e);
+            userStates = {};
+        }
+    }
+}
+
+function saveUserStates() {
+    try {
+        const clean = {};
+        for (const jid in userStates) {
+            clean[jid] = {
+                currentStepIndex: userStates[jid].currentStepIndex,
+                status: userStates[jid].status,
+                lastActive: userStates[jid].lastActive,
+                answers: userStates[jid].answers || {}
+            };
+        }
+        fs.writeFileSync(STATES_FILE, JSON.stringify(clean, null, 2));
+    } catch (e) {
+        console.error('Error saving user_states.json:', e);
+    }
+}
+
+loadUserStates();
 
 function recordIncomingMessage(jid, text, msg) {
     const rawNumber = jid.split('@')[0];
@@ -303,82 +353,187 @@ function recordOutgoingMessage(jid, text, mediaPath) {
 }
 
 async function handleFlowForUser(jid, incomingText) {
-    const state = userStates[jid];
+    const rawText = (incomingText || '').trim();
 
-    // Check if user is manually paused or completed
-    if (liveChats[jid] && liveChats[jid].botStatus === 'paused') {
-        console.log(`Bot is paused for ${jid}. Ignoring automated reply.`);
+    // Check for user manual reset command
+    if (rawText.toLowerCase() === '#reset' || rawText.toLowerCase() === '#reiniciar') {
+        console.log(`[Baileys Flow] User ${jid} sent reset command: ${rawText}`);
+        if (userStates[jid]?.waitTimeoutId) {
+            clearTimeout(userStates[jid].waitTimeoutId);
+        }
+        delete userStates[jid];
+        saveUserStates();
+        if (liveChats[jid]) {
+            liveChats[jid].botStatus = 'active';
+            saveChats();
+        }
+        if (sock && clientReady) {
+            await sock.sendMessage(jid, {
+                text: '🔄 O seu fluxo foi reiniciado com sucesso!\nEnvie qualquer mensagem para começar novamente.'
+            });
+        }
         return;
     }
 
-    // Session timeout check
-    if (state && state.status !== 'completed' && state.status !== 'paused' && (Date.now() - state.lastActive > SESSION_TIMEOUT_MS)) {
-        console.log(`Session timed out for ${jid}. Resetting.`);
-        if (state.waitTimeoutId) clearTimeout(state.waitTimeoutId);
-        delete userStates[jid];
+    // Check if user is manually paused by an operator in Live Chat
+    if (liveChats[jid] && liveChats[jid].botStatus === 'paused') {
+        console.log(`[Baileys Flow] Bot is paused for ${jid}. Operator active. Automated reply ignored.`);
+        return;
     }
 
-    const currentState = userStates[jid];
+    const state = userStates[jid];
 
-    if (currentState) {
-        if (currentState.status === 'completed' || currentState.status === 'paused') {
-            return;
-        }
-
-        if (currentState.status === 'waiting_reply') {
-            console.log(`User ${jid} replied to question. Advancing flow to step ${currentState.currentStepIndex + 1}`);
-            executeStep(jid, currentState.currentStepIndex + 1);
-        }
-    } else {
-        // Start flow from beginning
-        console.log(`Starting new flow for ${jid}`);
-        executeStep(jid, 0);
+    // If flow is already completed for this user, do not loop
+    if (state && state.status === 'completed') {
+        console.log(`[Baileys Flow] User ${jid} already completed the flow. Ignoring automated loop.`);
+        return;
     }
+
+    // If currently paused in state
+    if (state && state.status === 'paused') {
+        return;
+    }
+
+    // If the question is currently transmitting, buffer this reply
+    if (state && state.status === 'sending_question') {
+        console.log(`[Baileys Flow] User ${jid} replied while question was transmitting. Buffering reply: "${rawText}"`);
+        state.pendingReply = rawText || '[Resposta]';
+        saveUserStates();
+        return;
+    }
+
+    // If waiting for reply to a question -> user answered! Advance to next step
+    if (state && state.status === 'waiting_reply') {
+        console.log(`[Baileys Flow] User ${jid} answered question step ${state.currentStepIndex + 1}: "${rawText}". Advancing to step ${state.currentStepIndex + 2}...`);
+        if (!state.answers) state.answers = {};
+        state.answers[state.currentStepIndex] = rawText || '[Resposta]';
+        state.status = 'running';
+        state.lastActive = Date.now();
+        state.pendingReply = null;
+        saveUserStates();
+
+        await executeStep(jid, state.currentStepIndex + 1);
+        return;
+    }
+
+    // If already actively running a step or in a wait delay
+    if (state && state.status === 'running') {
+        console.log(`[Baileys Flow] Flow is already active for ${jid} at step ${state.currentStepIndex + 1}. Message noted.`);
+        return;
+    }
+
+    // New conversation -> start from step 0
+    console.log(`[Baileys Flow] Starting new automated funnel for ${jid}`);
+    await executeStep(jid, 0);
 }
 
 async function executeStep(jid, stepIndex) {
-    const steps = botData.steps || [];
-
-    // Clear any pending wait timer
-    if (userStates[jid] && userStates[jid].waitTimeoutId) {
-        clearTimeout(userStates[jid].waitTimeoutId);
-    }
-
-    // Check if flow finished
-    if (stepIndex >= steps.length) {
-        console.log(`Flow finished for ${jid}`);
-        userStates[jid] = {
-            currentStepIndex: steps.length,
-            status: 'completed',
-            lastActive: Date.now(),
-            waitTimeoutId: null
-        };
+    // Concurrency lock per user
+    if (userLocks.has(jid)) {
+        console.log(`[Baileys Lock] Step execution currently active for ${jid}, queuing step ${stepIndex}`);
+        setTimeout(() => executeStep(jid, stepIndex), 800);
         return;
     }
+    userLocks.add(jid);
 
-    const step = steps[stepIndex];
-    userStates[jid] = {
-        currentStepIndex: stepIndex,
-        status: 'running',
-        lastActive: Date.now(),
-        waitTimeoutId: null
-    };
+    try {
+        const steps = botData.steps || [];
 
-    console.log(`[Step ${stepIndex + 1}/${steps.length}] (${step.type}) -> ${jid}`);
+        // Clear any pending wait timer
+        if (userStates[jid]?.waitTimeoutId) {
+            clearTimeout(userStates[jid].waitTimeoutId);
+            userStates[jid].waitTimeoutId = null;
+        }
 
-    if (step.type === 'message') {
-        await sendStepPayload(jid, step);
-        executeStep(jid, stepIndex + 1);
-    } else if (step.type === 'wait') {
-        const delaySec = parseFloat(step.duration) || 2;
-        const timeoutId = setTimeout(() => {
-            executeStep(jid, stepIndex + 1);
-        }, delaySec * 1000);
-        userStates[jid].waitTimeoutId = timeoutId;
-    } else if (step.type === 'question') {
-        await sendStepPayload(jid, step);
-        userStates[jid].status = 'waiting_reply';
-        userStates[jid].lastActive = Date.now();
+        // Check if finished
+        if (stepIndex >= steps.length) {
+            console.log(`[Baileys Flow] Flow completed for ${jid}`);
+            userStates[jid] = {
+                currentStepIndex: steps.length,
+                status: 'completed',
+                lastActive: Date.now(),
+                answers: userStates[jid]?.answers || {},
+                waitTimeoutId: null
+            };
+            saveUserStates();
+            return;
+        }
+
+        const step = steps[stepIndex];
+        console.log(`[Baileys Step ${stepIndex + 1}/${steps.length}] (${step.type}) -> ${jid}`);
+
+        if (step.type === 'message') {
+            userStates[jid] = {
+                currentStepIndex: stepIndex,
+                status: 'running',
+                lastActive: Date.now(),
+                answers: userStates[jid]?.answers || {},
+                waitTimeoutId: null
+            };
+            saveUserStates();
+
+            await sendStepPayload(jid, step);
+
+            if (userStates[jid] && userStates[jid].status === 'running' && liveChats[jid]?.botStatus !== 'paused') {
+                userLocks.delete(jid);
+                return executeStep(jid, stepIndex + 1);
+            }
+        } else if (step.type === 'wait') {
+            userStates[jid] = {
+                currentStepIndex: stepIndex,
+                status: 'running',
+                lastActive: Date.now(),
+                answers: userStates[jid]?.answers || {},
+                waitTimeoutId: null
+            };
+            saveUserStates();
+
+            const delaySec = Math.max(parseFloat(step.duration) || 2, 1);
+            console.log(`[Baileys Wait] Step ${stepIndex + 1}: Waiting ${delaySec}s before step ${stepIndex + 2} for ${jid}...`);
+
+            const timeoutId = setTimeout(() => {
+                if (userStates[jid] && userStates[jid].status === 'running' && liveChats[jid]?.botStatus !== 'paused') {
+                    executeStep(jid, stepIndex + 1);
+                }
+            }, delaySec * 1000);
+            userStates[jid].waitTimeoutId = timeoutId;
+        } else if (step.type === 'question') {
+            userStates[jid] = {
+                currentStepIndex: stepIndex,
+                status: 'sending_question',
+                lastActive: Date.now(),
+                answers: userStates[jid]?.answers || {},
+                pendingReply: null,
+                waitTimeoutId: null
+            };
+            saveUserStates();
+
+            await sendStepPayload(jid, step);
+
+            if (userStates[jid] && liveChats[jid]?.botStatus !== 'paused') {
+                if (userStates[jid].pendingReply) {
+                    const buffered = userStates[jid].pendingReply;
+                    console.log(`[Baileys Flow] User ${jid} had buffered reply: "${buffered}". Advancing to step ${stepIndex + 1}`);
+                    userStates[jid].answers[stepIndex] = buffered;
+                    userStates[jid].pendingReply = null;
+                    userStates[jid].status = 'running';
+                    userStates[jid].lastActive = Date.now();
+                    saveUserStates();
+
+                    userLocks.delete(jid);
+                    return executeStep(jid, stepIndex + 1);
+                } else {
+                    userStates[jid].status = 'waiting_reply';
+                    userStates[jid].lastActive = Date.now();
+                    saveUserStates();
+                    console.log(`🛑 [Baileys Question] Step ${stepIndex + 1} PAUSED. Bot is strictly waiting for user ${jid} to reply.`);
+                }
+            }
+        }
+    } catch (err) {
+        console.error(`Error in executeStep for ${jid}:`, err);
+    } finally {
+        userLocks.delete(jid);
     }
 }
 
@@ -386,7 +541,6 @@ async function sendStepPayload(jid, step) {
     if (!sock || !clientReady) return;
 
     try {
-        // Natural human typing/recording delay
         const isAudio = step.media && (step.media.endsWith('.mp3') || step.media.endsWith('.ogg') || step.media.endsWith('.m4a') || step.media.endsWith('.wav'));
         
         if (isAudio) {
@@ -400,6 +554,7 @@ async function sendStepPayload(jid, step) {
         await delay(typingDelayMs);
         await sock.sendPresenceUpdate('paused', jid);
 
+        let mediaSent = false;
         if (step.media) {
             const mediaFullPath = path.join(__dirname, step.media);
             if (fs.existsSync(mediaFullPath)) {
@@ -407,7 +562,6 @@ async function sendStepPayload(jid, step) {
                 const buffer = fs.readFileSync(mediaFullPath);
 
                 if (isAudio) {
-                    // Send as WhatsApp Voice Note (PTT)
                     let mimetype = 'audio/mp4';
                     if (ext === '.ogg') mimetype = 'audio/ogg; codecs=opus';
                     else if (ext === '.mp3') mimetype = 'audio/mp3';
@@ -419,18 +573,23 @@ async function sendStepPayload(jid, step) {
                         ptt: true
                     });
                     recordOutgoingMessage(jid, '', step.media);
+                    mediaSent = true;
                 } else if (['.jpg', '.jpeg', '.png', '.gif'].includes(ext)) {
                     await sock.sendMessage(jid, {
                         image: buffer,
                         caption: step.text || undefined
                     });
                     recordOutgoingMessage(jid, step.text || '', step.media);
+                    mediaSent = true;
+                    return;
                 } else if (['.mp4', '.mov', '.avi'].includes(ext)) {
                     await sock.sendMessage(jid, {
                         video: buffer,
                         caption: step.text || undefined
                     });
                     recordOutgoingMessage(jid, step.text || '', step.media);
+                    mediaSent = true;
+                    return;
                 } else {
                     await sock.sendMessage(jid, {
                         document: buffer,
@@ -439,12 +598,13 @@ async function sendStepPayload(jid, step) {
                         caption: step.text || undefined
                     });
                     recordOutgoingMessage(jid, step.text || '', step.media);
+                    mediaSent = true;
+                    return;
                 }
-                return;
             }
         }
 
-        if (step.text) {
+        if (step.text && (!mediaSent || isAudio)) {
             await sock.sendMessage(jid, { text: step.text });
             recordOutgoingMessage(jid, step.text, null);
         }
@@ -553,10 +713,24 @@ app.get('/api/messages/:jid', (req, res) => {
     if (chat) {
         chat.unread = 0;
         saveChats();
-        res.json({ success: true, chat: chat });
+        res.json({ success: true, chat: chat, flowState: userStates[jid] || null });
     } else {
         res.status(404).json({ error: 'Chat not found' });
     }
+});
+
+app.post('/api/reset-user/:jid', (req, res) => {
+    const jid = req.params.jid;
+    if (userStates[jid]?.waitTimeoutId) {
+        clearTimeout(userStates[jid].waitTimeoutId);
+    }
+    delete userStates[jid];
+    saveUserStates();
+    if (liveChats[jid]) {
+        liveChats[jid].botStatus = 'active';
+        saveChats();
+    }
+    res.json({ success: true, message: 'Fluxo reiniciado com sucesso para este contato.' });
 });
 
 app.post('/api/send', async (req, res) => {

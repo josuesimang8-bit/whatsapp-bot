@@ -466,6 +466,64 @@
             justify-content: space-between;
         }
 
+        .step-header-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .step-number-tag {
+            background: #E2E8F0;
+            color: #334155;
+            font-weight: 800;
+            font-size: 12px;
+            padding: 4px 8px;
+            border-radius: 6px;
+        }
+
+        .step-type-select {
+            font-size: 13px;
+            font-weight: 700;
+            padding: 6px 12px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            outline: none;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .step-type-select.message {
+            background: #EFF6FF;
+            color: #1D4ED8;
+            border-color: #BFDBFE;
+        }
+
+        .step-type-select.question {
+            background: #FFFBEB;
+            color: #B45309;
+            border-color: #FDE68A;
+        }
+
+        .step-type-select.wait {
+            background: #ECFDF5;
+            color: #047857;
+            border-color: #A7F3D0;
+        }
+
+        .question-notice {
+            background: #FEF3C7;
+            border: 1px solid #FCD34D;
+            color: #92400E;
+            padding: 9px 13px;
+            border-radius: 8px;
+            font-size: 12px;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            line-height: 1.4;
+        }
+
         .step-badge {
             display: flex;
             align-items: center;
@@ -963,11 +1021,17 @@
                         <div class="chat-thread-user">
                             <div class="chat-avatar" id="activeAvatar">U</div>
                             <div>
-                                <div style="font-size: 14px; font-weight: 700;" id="activeName">Nome</div>
+                                <div style="font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+                                    <span id="activeName">Nome</span>
+                                    <span id="activeFlowStatus" style="font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: 600; background: #EEF2FF; color: #4F46E5;">Iniciando</span>
+                                </div>
                                 <div style="font-size: 12px; color: var(--text-muted);" id="activePhone">+258 ...</div>
                             </div>
                         </div>
-                        <div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <button class="btn btn-outline" style="font-size: 12px;" onclick="resetFlowForCurrentChat()" title="Reinicia o fluxo do bot de volta ao início para este contato">
+                                🔄 Reiniciar Fluxo
+                            </button>
                             <button class="btn btn-outline" style="font-size: 12px;" id="botToggleBtn" onclick="toggleBotForCurrentChat()">
                                 🤖 Bot: Ativo
                             </button>
@@ -1129,35 +1193,35 @@
                 const card = document.createElement('div');
                 card.className = 'flow-step-card';
 
-                let typeLabel = '💬 Mensagem de Texto';
-                let badgeClass = 'message';
-                if (step.type === 'question') {
-                    typeLabel = '❓ Pergunta (Aguardar Resposta)';
-                    badgeClass = 'question';
-                } else if (step.type === 'wait') {
-                    typeLabel = '⏱️ Espera de Tempo';
-                    badgeClass = 'wait';
-                }
-
                 card.innerHTML = `
                     <div class="step-header">
-                        <div class="step-badge ${badgeClass}">
-                            <span>${idx + 1}.</span> ${typeLabel}
+                        <div class="step-header-left">
+                            <span class="step-number-tag">#${idx + 1}</span>
+                            <select class="step-type-select ${step.type}" onchange="changeStepType(${idx}, this.value)">
+                                <option value="message" ${step.type === 'message' ? 'selected' : ''}>💬 Mensagem de Texto</option>
+                                <option value="question" ${step.type === 'question' ? 'selected' : ''}>❓ Pergunta (Aguardar Resposta)</option>
+                                <option value="wait" ${step.type === 'wait' ? 'selected' : ''}>⏱️ Espera / Intervalo</option>
+                            </select>
                         </div>
                         <div class="step-tools">
-                            ${idx > 0 ? `<button class="icon-btn" onclick="moveStep(${idx}, -1)">↑</button>` : ''}
-                            ${idx < steps.length - 1 ? `<button class="icon-btn" onclick="moveStep(${idx}, 1)">↓</button>` : ''}
-                            <button class="icon-btn delete" onclick="deleteStep(${idx})">🗑️</button>
+                            ${idx > 0 ? `<button class="icon-btn" title="Mover para cima" onclick="moveStep(${idx}, -1)">↑</button>` : ''}
+                            ${idx < steps.length - 1 ? `<button class="icon-btn" title="Mover para baixo" onclick="moveStep(${idx}, 1)">↓</button>` : ''}
+                            <button class="icon-btn delete" title="Apagar bloco" onclick="deleteStep(${idx})">🗑️</button>
                         </div>
                     </div>
                     <div class="step-body">
+                        ${step.type === 'question' ? `
+                            <div class="question-notice">
+                                🛑 <strong>Pergunta com Pausa:</strong> O bot enviará esta mensagem e <u>irá parar</u> até que o cliente responda no WhatsApp. Assim que o cliente responder, o fluxo avança para o próximo passo.
+                            </div>
+                        ` : ''}
                         ${step.type === 'wait' ? `
                             <div style="display: flex; align-items: center; gap: 10px;">
                                 <label style="font-size: 13px; font-weight: 600;">Tempo de espera (segundos):</label>
                                 <input type="number" style="padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; width: 100px; font-size: 14px;" value="${step.duration || 5}" onchange="updateStepDuration(${idx}, this.value)">
                             </div>
                         ` : `
-                            <textarea class="step-textarea" placeholder="Digite o conteúdo da mensagem..." onchange="updateStepText(${idx}, this.value)">${step.text || ''}</textarea>
+                            <textarea class="step-textarea" placeholder="${step.type === 'question' ? 'Digite a pergunta que o bot fará ao cliente...' : 'Digite o conteúdo da mensagem...'}" onchange="updateStepText(${idx}, this.value)">${step.text || ''}</textarea>
                             
                             <div class="media-dropzone">
                                 <div class="media-preview-box" id="mediaPreview-${idx}">
@@ -1176,6 +1240,14 @@
                 `;
                 container.appendChild(card);
             });
+        }
+
+        function changeStepType(idx, newType) {
+            steps[idx].type = newType;
+            if (newType === 'wait' && !steps[idx].duration) {
+                steps[idx].duration = '5';
+            }
+            renderFlow();
         }
 
         function renderMediaPreview(mediaPath) {
@@ -1348,6 +1420,33 @@
                     document.getElementById('activePhone').innerText = chat.phone;
                     document.getElementById('activeAvatar').innerText = (chat.name || 'C').charAt(0).toUpperCase();
 
+                    // Update flow state badge
+                    const flowStatusEl = document.getElementById('activeFlowStatus');
+                    if (flowStatusEl) {
+                        const fs = data.flowState;
+                        if (!fs) {
+                            flowStatusEl.innerText = 'Não iniciado';
+                            flowStatusEl.style.background = '#F1F5F9';
+                            flowStatusEl.style.color = '#475569';
+                        } else if (fs.status === 'completed') {
+                            flowStatusEl.innerText = 'Fluxo Concluído';
+                            flowStatusEl.style.background = '#D1FAE5';
+                            flowStatusEl.style.color = '#065F46';
+                        } else if (fs.status === 'waiting_reply') {
+                            flowStatusEl.innerText = `Passo ${fs.currentStepIndex + 1}: Aguardando Resposta`;
+                            flowStatusEl.style.background = '#FEF3C7';
+                            flowStatusEl.style.color = '#92400E';
+                        } else if (fs.status === 'sending_question' || fs.status === 'running') {
+                            flowStatusEl.innerText = `Passo ${fs.currentStepIndex + 1}: Em andamento`;
+                            flowStatusEl.style.background = '#EEF2FF';
+                            flowStatusEl.style.color = '#4338CA';
+                        } else if (fs.status === 'paused') {
+                            flowStatusEl.innerText = `Pausado`;
+                            flowStatusEl.style.background = '#FEE2E2';
+                            flowStatusEl.style.color = '#B91C1C';
+                        }
+                    }
+
                     const isBot = (chat.botStatus || 'active') === 'active';
                     const btn = document.getElementById('botToggleBtn');
                     btn.innerText = isBot ? '🤖 Bot: Ativo' : '👤 Atendimento Humano';
@@ -1376,6 +1475,24 @@
                     area.scrollTop = area.scrollHeight;
                 }
             } catch (e) {}
+        }
+
+        async function resetFlowForCurrentChat() {
+            if (!activeChatJid) return;
+            if (!confirm('Deseja reiniciar o fluxo deste cliente para o início (Passo 1)?')) return;
+            try {
+                const res = await fetch(`/api/reset-user/${encodeURIComponent(activeChatJid)}`, { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('Fluxo reiniciado para este cliente!');
+                    await loadActiveMessages(activeChatJid);
+                    loadChats();
+                } else {
+                    showToast('Erro ao reiniciar fluxo.');
+                }
+            } catch (e) {
+                showToast('Erro de conexão ao reiniciar.');
+            }
         }
 
         async function sendManualMessage() {

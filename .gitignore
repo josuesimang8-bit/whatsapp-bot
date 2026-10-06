@@ -6,3 +6,7 @@ scratch/
 *.log
 public/*.png
 config.json
+auth_info_baileys/
+user_states.json
+live_chats.json
+test_*.js
