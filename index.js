@@ -70,7 +70,7 @@ function convertToWhatsAppOpus(inputPath) {
             } catch (e) {}
         }
 
-        const cmd = `ffmpeg -y -i "${inputPath}" -vn -c:a libopus -b:a 32k -vbr on -ar 48000 -ac 1 -avoid_negative_ts make_zero "${outputPath}"`;
+        const cmd = `ffmpeg -y -i "${inputPath}" -vn -c:a libopus -b:a 64k -vbr on -ar 48000 -ac 1 -avoid_negative_ts make_zero "${outputPath}"`;
         console.log(`[FFmpeg] Converting audio for WhatsApp Opus PTT: ${inputPath} -> ${outputPath}`);
 
         exec(cmd, (err, stdout, stderr) => {
@@ -87,6 +87,16 @@ function convertToWhatsAppOpus(inputPath) {
             }
         });
     });
+}
+
+function generateWaveform() {
+    const samples = 64;
+    const wave = new Uint8Array(samples);
+    for (let i = 0; i < samples; i++) {
+        const val = Math.floor(25 + 55 * Math.abs(Math.sin((i / samples) * Math.PI * 3)) + Math.random() * 15);
+        wave[i] = Math.min(100, Math.max(10, val));
+    }
+    return wave;
 }
 
 async function preConvertAudios() {
@@ -660,12 +670,14 @@ async function sendStepPayload(jid, step) {
                 if (isAudio) {
                     const audioInfo = await convertToWhatsAppOpus(mediaFullPath);
                     const audioBuffer = fs.readFileSync(audioInfo.path);
+                    const wave = generateWaveform();
 
                     await sock.sendMessage(jid, {
                         audio: audioBuffer,
                         mimetype: 'audio/ogg; codecs=opus',
                         ptt: true,
-                        seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined
+                        seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined,
+                        waveform: wave
                     });
                     recordOutgoingMessage(jid, '', step.media);
                     mediaSent = true;
