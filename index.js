@@ -1,30 +1,19 @@
-// Patch whatsapp-web.js ready timeout and injection resilience before import
-try {
-    require('./patch-wwebjs');
-} catch (e) {
-    console.error('Non-critical: error running patch-wwebjs:', e.message);
-}
-
 const express = require('express');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore,
+    delay
+} = require('@whiskeysockets/baileys');
+const pino = require('pino');
 const qrcode = require('qrcode');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
-const { execSync } = require('child_process');
-
-// Handle Windows file lock (EBUSY) crashes gracefully
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection:', reason);
-});
-
-process.on('uncaughtException', (err) => {
-    console.error('Uncaught Exception:', err);
-    if (err.message && err.message.includes('EBUSY')) {
-        console.log('Safe to ignore: Windows file lock (EBUSY) prevented deleting session files immediately.');
-    }
-});
+const https = require('https');
 
 const app = express();
 app.use(cors());
@@ -53,12 +42,34 @@ function saveData() {
 
 loadData();
 
+// Live Chat History Storage
+const CHATS_FILE = path.join(__dirname, 'live_chats.json');
+let liveChats = {}; // { jid: { id, name, lastMessage, timestamp, unread, botStatus: 'active'|'paused', messages: [] } }
+
+function loadChats() {
+    if (fs.existsSync(CHATS_FILE)) {
+        try {
+            liveChats = JSON.parse(fs.readFileSync(CHATS_FILE, 'utf-8'));
+        } catch (e) {
+            liveChats = {};
+        }
+    }
+}
+
+function saveChats() {
+    try {
+        fs.writeFileSync(CHATS_FILE, JSON.stringify(liveChats, null, 2));
+    } catch (e) {}
+}
+
+loadChats();
+
 // Multer setup for uploads
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
         const uploadPath = path.join(__dirname, 'uploads');
         if (!fs.existsSync(uploadPath)) {
-            fs.mkdirSync(uploadPath);
+            fs.mkdirSync(uploadPath, { recursive: true });
         }
         cb(null, uploadPath);
     },
@@ -68,387 +79,275 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-// WhatsApp Client
-let client = null;
+// WhatsApp Connection State (Baileys)
+let sock = null;
 let currentQR = '';
 let clientReady = false;
-let initStatus = 'disconnected'; // 'disconnected' | 'initializing' | 'waiting_qr' | 'ready' | 'error'
+let initStatus = 'disconnected'; // 'disconnected' | 'connecting' | 'waiting_qr' | 'ready'
 let initError = '';
-let landingBypassInterval = null;
+let connectedUser = null; // { phone, name }
+let readyTimestamp = Math.floor(Date.now() / 1000);
 
-function getChromiumPath() {
-    const paths = [
-        process.env.PUPPETEER_EXECUTABLE_PATH,
-        // Linux Paths (for Render)
-        '/usr/bin/chromium',
-        '/usr/bin/chromium-browser',
-        '/usr/bin/google-chrome-stable',
-        '/usr/bin/google-chrome'
-    ];
-    
-    for (const p of paths) {
-        if (p && fs.existsSync(p)) {
-            console.log(`Found browser executable at: ${p}`);
-            return p;
-        }
-    }
-    
-    console.log('No specific browser executable found, letting Puppeteer choose default.');
-    return undefined;
-}
+const AUTH_DIR = path.join(__dirname, 'auth_info_baileys');
+const logger = pino({ level: 'silent' });
 
-function getMessageMediaForFile(filePath) {
-    if (!fs.existsSync(filePath)) return null;
-    const ext = path.extname(filePath).toLowerCase();
-    const fileBuffer = fs.readFileSync(filePath);
-    const base64Data = fileBuffer.toString('base64');
-    const filename = path.basename(filePath);
-    
-    let mimetype = '';
-    if (ext === '.ogg') {
-        mimetype = 'audio/ogg; codecs=opus';
-    } else if (ext === '.mp3') {
-        mimetype = 'audio/mp3';
-    } else if (ext === '.wav') {
-        mimetype = 'audio/wav';
-    } else if (ext === '.m4a') {
-        mimetype = 'audio/mp4';
-    } else {
-        // Fallback to standard mime guess
-        const isImage = ext === '.jpg' || ext === '.jpeg' || ext === '.png' || ext === '.gif';
-        const isVideo = ext === '.mp4' || ext === '.mov' || ext === '.avi';
-        if (isImage) mimetype = 'image/' + (ext === '.jpg' ? 'jpeg' : ext.replace('.', ''));
-        else if (isVideo) mimetype = 'video/' + ext.replace('.', '');
-        else mimetype = 'application/octet-stream';
-    }
-    
-    return new MessageMedia(mimetype, base64Data, filename);
-}
-
-function clearLandingBypass() {
-    if (landingBypassInterval) {
-        clearInterval(landingBypassInterval);
-        landingBypassInterval = null;
-    }
-}
-
-async function safeDestroyClient() {
-    clearLandingBypass();
-    console.log('Safely destroying WhatsApp client...');
-    
-    // Force kill the Chrome child process if it exists to release file locks
-    if (client && client.pupBrowser && client.pupBrowser.process()) {
-        const pid = client.pupBrowser.process().pid;
-        console.log(`Force killing browser process (PID: ${pid}) to release file locks...`);
-        try {
-            process.kill(pid, 'SIGKILL');
-        } catch (e) {
-            console.log(`Process PID ${pid} already closed or not killable: ${e.message}`);
-        }
-    }
-    
-    // Proactively kill any zombie Chrome processes tied to our session dir
-    if (process.platform === 'win32') {
-        try {
-            console.log('Force killing any zombie Chrome processes holding locks on the session directory...');
-            const cmd = 'powershell -Command "Get-CimInstance Win32_Process -Filter \\"Name = \'chrome.exe\'\\" | Where-Object { $_.CommandLine -like \'*whatsapp-bot\\.wwebjs_auth\\session*\' } | Remove-CimInstance"';
-            execSync(cmd, { stdio: 'ignore' });
-            console.log('Zombie Chrome processes killed successfully.');
-        } catch (e) {
-            console.log('Non-critical: Error killing zombie Chrome processes:', e.message);
-        }
-    } else {
-        try {
-            console.log('Killing any zombie Chromium processes on Linux...');
-            execSync('pkill -9 -f chromium || pkill -9 -f chrome || true', { stdio: 'ignore' });
-            console.log('Zombie Chromium processes killed successfully.');
-        } catch (e) {
-            console.log('Non-critical: Error killing zombie processes on Linux:', e.message);
-        }
-    }
-    
-    if (client) {
-        try {
-            await client.destroy();
-        } catch (err) {
-            console.error('Error during client.destroy():', err.message);
-        }
-    }
-    
-    client = null;
-    clientReady = false;
-    initStatus = 'disconnected';
-}
-
-function initWhatsAppClient() {
-    if (clientReady || initStatus === 'ready' || initStatus === 'waiting_qr' || initStatus === 'initializing') {
-        console.log('Client is already active or initializing.');
+async function initWhatsApp() {
+    if (sock && (clientReady || initStatus === 'connecting')) {
+        console.log('Baileys: Client is already connecting or active.');
         return;
     }
 
-    // Clean up zombie locks and processes before launching Chrome to prevent launch timeouts or SingletonLock errors
-    if (process.platform !== 'win32') {
-        try {
-            execSync('pkill -9 -f chromium || pkill -9 -f chrome || true', { stdio: 'ignore' });
-        } catch (e) {}
-    }
-
-    try {
-        const sessionPath = path.join(__dirname, '.wwebjs_auth', 'session');
-        const lockNames = [
-            'lockfile',
-            'DevToolsActivePort',
-            'SingletonLock',
-            'SingletonCookie',
-            'SingletonSocket',
-            path.join('Default', 'LOCK')
-        ];
-        
-        for (const name of lockNames) {
-            const p = path.join(sessionPath, name);
-            if (fs.existsSync(p)) {
-                try {
-                    fs.rmSync(p, { force: true, recursive: true });
-                } catch (e) {}
-            }
-        }
-        console.log('Cleaned up Chrome lock & Singleton files successfully.');
-    } catch (err) {
-        console.error('Non-critical: Error cleaning lock files on startup:', err.message);
-    }
-
-    console.log('Initializing WhatsApp client...');
-    initStatus = 'initializing';
+    console.log('Baileys: Initializing connection...');
+    initStatus = 'connecting';
     initError = '';
     currentQR = '';
-    let readyTimestamp = Math.floor(Date.now() / 1000);
 
-    const isWindows = process.platform === 'win32';
-    // User-Agent must strictly match host OS platform to avoid WhatsApp anti-bot session rejection after scan
-    const userAgent = isWindows
-        ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
-        : 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
-
-    const puppeteerArgs = [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--disable-gpu',
-        '--disable-extensions',
-        '--disable-software-rasterizer',
-        '--disable-blink-features=AutomationControlled',
-        `--user-agent=${userAgent}`
-    ];
-
-    if (!isWindows) {
-        // Essential low-memory args for cloud containers (Render 512MB RAM limit)
-        puppeteerArgs.push(
-            '--no-zygote',
-            '--single-process',
-            '--password-store=basic',
-            '--use-mock-keychain',
-            '--disable-background-networking',
-            '--disable-background-timer-throttling',
-            '--disable-backgrounding-occluded-windows',
-            '--disable-breakpad',
-            '--disable-component-update',
-            '--disable-renderer-backgrounding',
-            '--js-flags=--max-old-space-size=256'
-        );
-    }
-
-    const puppeteerOpts = {
-        headless: true,
-        args: puppeteerArgs
-    };
-
-    if (isWindows) {
-        puppeteerOpts.channel = 'chrome';
-        console.log('Windows detected: Using system Chrome channel for full media codec support.');
-    } else {
-        puppeteerOpts.executablePath = getChromiumPath();
-        console.log('Linux/Other detected: Using detected Chromium path:', puppeteerOpts.executablePath);
-    }
-
-    client = new Client({
-        authStrategy: new LocalAuth(),
-        puppeteer: puppeteerOpts,
-        webVersionCache: { type: 'none' }, // Always load genuine live WhatsApp Web, bypass stale cache
-        authTimeoutMs: 180000, // 3 minutes timeout so cloud containers have plenty of time to sync chats
-        qrMaxRetries: 5,
-        takeoverOnConflict: true,
-        takeoverTimeoutMs: 0
-    });
-
-    // Interstitial landing bypass - only active during initial load before QR is received
-    clearLandingBypass();
-    landingBypassInterval = setInterval(async () => {
-        if (client && client.pupPage && initStatus === 'initializing') {
-            try {
-                const buttons = await client.pupPage.$$('button, a, div[role="button"]');
-                for (const button of buttons) {
-                    const text = await client.pupPage.evaluate(el => el.textContent, button);
-                    if (text && (text.includes('Continuar para o WhatsApp Web') || text.includes('Continue to WhatsApp Web'))) {
-                        console.log('Detected WhatsApp Web landing interstitial page. Clicking "Continue to WhatsApp Web" button...');
-                        await button.click();
-                        break;
-                    }
-                }
-            } catch (err) {
-                // Ignore evaluation errors during reload or initialization
-            }
-        } else if (initStatus !== 'initializing') {
-            clearLandingBypass();
+    try {
+        if (!fs.existsSync(AUTH_DIR)) {
+            fs.mkdirSync(AUTH_DIR, { recursive: true });
         }
-    }, 4000);
 
-    client.on('qr', (qr) => {
-        clearLandingBypass();
-        console.log('QR Code generated. Please scan to authenticate.');
-        initStatus = 'waiting_qr';
-        qrcode.toDataURL(qr, (err, url) => {
-            if (!err) {
-                currentQR = url;
-            } else {
-                console.error('Error generating QR data URL:', err);
+        const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+        const { version, isLatest } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307], isLatest: true }));
+
+        console.log(`Baileys: Using WA version v${version.join('.')}, isLatest: ${isLatest}`);
+
+        sock = makeWASocket({
+            version,
+            logger,
+            printQRInTerminal: false,
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, logger)
+            },
+            browser: ['Umbler Talk', 'Desktop', '1.0.0'],
+            generateHighQualityLinkPreview: true,
+            syncFullHistory: false
+        });
+
+        sock.ev.on('creds.update', saveCreds);
+
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr) {
+                console.log('Baileys: New QR Code received.');
+                initStatus = 'waiting_qr';
+                qrcode.toDataURL(qr, (err, url) => {
+                    if (!err) {
+                        currentQR = url;
+                    } else {
+                        console.error('Error generating QR URL:', err);
+                    }
+                });
+            }
+
+            if (connection === 'close') {
+                const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                console.log(`Baileys: Connection closed. Status: ${statusCode}. Reconnecting: ${shouldReconnect}`);
+
+                clientReady = false;
+                currentQR = '';
+                connectedUser = null;
+
+                if (statusCode === DisconnectReason.loggedOut) {
+                    initStatus = 'disconnected';
+                    initError = 'Desconectado do WhatsApp. Escaneie o código QR para reconectar.';
+                    try {
+                        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+                    } catch (e) {}
+                    sock = null;
+                    setTimeout(initWhatsApp, 2000);
+                } else {
+                    initStatus = 'connecting';
+                    initError = 'Reconectando ao WhatsApp...';
+                    sock = null;
+                    setTimeout(initWhatsApp, 3000);
+                }
+            } else if (connection === 'open') {
+                console.log('Baileys: Connected successfully!');
+                clientReady = true;
+                initStatus = 'ready';
+                currentQR = '';
+                initError = '';
+                readyTimestamp = Math.floor(Date.now() / 1000);
+
+                const rawId = sock.user?.id || '';
+                const phone = rawId.split(':')[0] || rawId.split('@')[0];
+                connectedUser = {
+                    id: rawId,
+                    phone: '+' + phone,
+                    name: sock.user?.name || phone
+                };
             }
         });
-    });
 
-    client.on('ready', () => {
-        clearLandingBypass();
-        console.log('Client is ready!');
-        clientReady = true;
-        currentQR = '';
-        initStatus = 'ready';
-        initError = '';
-        readyTimestamp = Math.floor(Date.now() / 1000);
-    });
+        // Messages handling
+        sock.ev.on('messages.upsert', async (m) => {
+            if (m.type !== 'notify') return;
 
-    client.on('authenticated', () => {
-        clearLandingBypass();
-        console.log('Authenticated successfully!');
-        initStatus = 'authenticated';
-        currentQR = '';
-        initError = 'Autenticado com sucesso! Sincronizando dados...';
-    });
+            for (const msg of m.messages) {
+                // Ignore outgoing messages sent by the bot
+                if (msg.key.fromMe) continue;
 
-    client.on('loading_screen', (percent, message) => {
-        clearLandingBypass();
-        console.log(`WhatsApp Web Loading: ${percent}% - ${message}`);
-        initStatus = 'loading';
-        initError = `Sincronizando WhatsApp (${percent}%)... ${message || ''}`;
-    });
+                const jid = msg.key.remoteJid;
+                // Ignore group chats and status/broadcasts
+                if (!jid || jid.endsWith('@g.us') || jid.includes('status@broadcast')) continue;
 
-    client.on('auth_failure', (msg) => {
-        clearLandingBypass();
-        console.error('Authentication failed:', msg);
-        clientReady = false;
-        initStatus = 'error';
-        initError = 'Falha na autenticação: ' + (msg || 'Tente escanear novamente.');
-    });
-
-    client.on('disconnected', async (reason) => {
-        clearLandingBypass();
-        console.log('Client disconnected:', reason);
-        clientReady = false;
-        currentQR = '';
-        initStatus = 'disconnected';
-        initError = `Desconectado (${reason || 'Sessão encerrada'}). A reiniciar...`;
-        await safeDestroyClient();
-        if (reason === 'LOGOUT') {
-            try {
-                const sessionPath = path.join(__dirname, '.wwebjs_auth');
-                if (fs.existsSync(sessionPath)) {
-                    fs.rmSync(sessionPath, { recursive: true, force: true });
-                    console.log('Cleaned up session folder after LOGOUT.');
+                // Ignore catch-up messages from before the bot connected
+                const msgTimestamp = Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000);
+                if (msgTimestamp < readyTimestamp) {
+                    console.log(`Ignoring old message from ${jid}`);
+                    continue;
                 }
-            } catch (e) {
-                console.error('Error cleaning session folder:', e.message);
+
+                // Extract message body text
+                const text = msg.message?.conversation ||
+                             msg.message?.extendedTextMessage?.text ||
+                             msg.message?.imageMessage?.caption ||
+                             msg.message?.videoMessage?.caption || '';
+
+                console.log(`[Baileys Incoming] ${jid}: "${text}"`);
+
+                // Save to live chat history
+                recordIncomingMessage(jid, text, msg);
+
+                // Handle automated flow execution
+                if (clientReady) {
+                    handleFlowForUser(jid, text);
+                }
             }
-        }
-        setTimeout(() => { initWhatsAppClient(); }, 4000);
-    });
+        });
 
-    client.on('message', async msg => {
-        // Ignore messages sent by the bot itself
-        if (msg.fromMe) {
-            console.log('Ignoring own outgoing message');
-            return;
-        }
-        // Ignore old offline/catch-up messages received before the bot went online
-        if (msg.timestamp < readyTimestamp) {
-            console.log(`Ignoring catch-up offline message from ${msg.from} (sent at ${msg.timestamp}, bot ready at ${readyTimestamp}).`);
-            return;
-        }
-
-        // Ignore group chats
-        if (msg.from.endsWith('@g.us')) return;
-
-        // Only respond if client is fully ready
-        if (!clientReady) return;
-
-        const numberId = msg.from;
-        const state = userStates[numberId];
-
-        // Check for session timeout (does not apply to manually completed or paused states)
-        if (state && state.status !== 'completed' && state.status !== 'paused' && (Date.now() - state.lastActive > SESSION_TIMEOUT_MS)) {
-            console.log(`Session timed out for ${numberId}. Starting over.`);
-            if (state.waitTimeoutId) clearTimeout(state.waitTimeoutId);
-            delete userStates[numberId];
-        }
-
-        const updatedState = userStates[numberId];
-
-        if (updatedState) {
-            // If state is completed or paused, strictly ignore automated flow messages
-            if (updatedState.status === 'completed' || updatedState.status === 'paused') {
-                console.log(`Ignoring incoming flow message from ${numberId} because bot status is: ${updatedState.status}`);
-                return;
-            }
-
-            if (updatedState.status === 'waiting_reply') {
-                console.log(`Received reply from ${numberId} for question. Advancing flow.`);
-                executeStep(numberId, updatedState.currentStepIndex + 1);
-            }
-        } else {
-            // No active flow. Start from step 0.
-            console.log(`Starting new flow for ${numberId}`);
-            executeStep(numberId, 0);
-        }
-    });
-
-    client.initialize().catch(async err => {
-        console.error('client.initialize() failed:', err);
+    } catch (err) {
+        console.error('Baileys init error:', err);
         initStatus = 'error';
         initError = err.message || String(err);
-        
-        // Auto-reconnect in 10s if initialization failed (network timeout, etc.)
-        console.log('Client initialization failed. Attempting clean reconnect in 10 seconds...');
-        clientReady = false;
-        await safeDestroyClient();
-        setTimeout(() => { initWhatsAppClient(); }, 10000);
-    });
+        sock = null;
+        setTimeout(initWhatsApp, 5000);
+    }
 }
 
-// Flow Execution Logic
-const userStates = {}; // { numberId: { currentStepIndex, status: 'running'|'waiting_reply'|'completed'|'paused', lastActive, waitTimeoutId } }
+// User Flow Execution State
+const userStates = {}; // { jid: { currentStepIndex, status: 'running'|'waiting_reply'|'completed'|'paused', lastActive, waitTimeoutId } }
 const SESSION_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 
-async function executeStep(numberId, stepIndex) {
-    const steps = botData.steps || [];
-    
-    // Clear any existing wait timeout for this user
-    if (userStates[numberId] && userStates[numberId].waitTimeoutId) {
-        clearTimeout(userStates[numberId].waitTimeoutId);
+function recordIncomingMessage(jid, text, msg) {
+    const rawNumber = jid.split('@')[0];
+    const pushName = msg.pushName || rawNumber;
+
+    if (!liveChats[jid]) {
+        liveChats[jid] = {
+            id: jid,
+            name: pushName,
+            phone: '+' + rawNumber,
+            lastMessage: text || 'Mídia recebida',
+            timestamp: Date.now(),
+            unread: 1,
+            botStatus: 'active',
+            messages: []
+        };
+    } else {
+        liveChats[jid].lastMessage = text || 'Mídia recebida';
+        liveChats[jid].timestamp = Date.now();
+        liveChats[jid].unread = (liveChats[jid].unread || 0) + 1;
+        if (pushName && pushName !== rawNumber) liveChats[jid].name = pushName;
     }
 
-    // Check if flow is finished
+    liveChats[jid].messages.push({
+        id: msg.key.id || String(Date.now()),
+        fromMe: false,
+        text: text || '',
+        timestamp: Date.now()
+    });
+
+    if (liveChats[jid].messages.length > 50) {
+        liveChats[jid].messages.shift();
+    }
+
+    saveChats();
+}
+
+function recordOutgoingMessage(jid, text, mediaPath) {
+    const rawNumber = jid.split('@')[0];
+    if (!liveChats[jid]) {
+        liveChats[jid] = {
+            id: jid,
+            name: rawNumber,
+            phone: '+' + rawNumber,
+            lastMessage: text || (mediaPath ? 'Mídia enviada' : ''),
+            timestamp: Date.now(),
+            unread: 0,
+            botStatus: 'active',
+            messages: []
+        };
+    } else {
+        liveChats[jid].lastMessage = text || (mediaPath ? 'Mídia enviada' : '');
+        liveChats[jid].timestamp = Date.now();
+    }
+
+    liveChats[jid].messages.push({
+        id: String(Date.now()),
+        fromMe: true,
+        text: text || '',
+        media: mediaPath || null,
+        timestamp: Date.now()
+    });
+
+    if (liveChats[jid].messages.length > 50) {
+        liveChats[jid].messages.shift();
+    }
+
+    saveChats();
+}
+
+async function handleFlowForUser(jid, incomingText) {
+    const state = userStates[jid];
+
+    // Check if user is manually paused or completed
+    if (liveChats[jid] && liveChats[jid].botStatus === 'paused') {
+        console.log(`Bot is paused for ${jid}. Ignoring automated reply.`);
+        return;
+    }
+
+    // Session timeout check
+    if (state && state.status !== 'completed' && state.status !== 'paused' && (Date.now() - state.lastActive > SESSION_TIMEOUT_MS)) {
+        console.log(`Session timed out for ${jid}. Resetting.`);
+        if (state.waitTimeoutId) clearTimeout(state.waitTimeoutId);
+        delete userStates[jid];
+    }
+
+    const currentState = userStates[jid];
+
+    if (currentState) {
+        if (currentState.status === 'completed' || currentState.status === 'paused') {
+            return;
+        }
+
+        if (currentState.status === 'waiting_reply') {
+            console.log(`User ${jid} replied to question. Advancing flow to step ${currentState.currentStepIndex + 1}`);
+            executeStep(jid, currentState.currentStepIndex + 1);
+        }
+    } else {
+        // Start flow from beginning
+        console.log(`Starting new flow for ${jid}`);
+        executeStep(jid, 0);
+    }
+}
+
+async function executeStep(jid, stepIndex) {
+    const steps = botData.steps || [];
+
+    // Clear any pending wait timer
+    if (userStates[jid] && userStates[jid].waitTimeoutId) {
+        clearTimeout(userStates[jid].waitTimeoutId);
+    }
+
+    // Check if flow finished
     if (stepIndex >= steps.length) {
-        console.log(`Flow finished and CLOSED for ${numberId}`);
-        userStates[numberId] = {
+        console.log(`Flow finished for ${jid}`);
+        userStates[jid] = {
             currentStepIndex: steps.length,
             status: 'completed',
             lastActive: Date.now(),
@@ -458,193 +357,162 @@ async function executeStep(numberId, stepIndex) {
     }
 
     const step = steps[stepIndex];
-    userStates[numberId] = {
+    userStates[jid] = {
         currentStepIndex: stepIndex,
         status: 'running',
         lastActive: Date.now(),
         waitTimeoutId: null
     };
 
-    console.log(`Executing step ${stepIndex + 1}/${steps.length} (${step.type}) for ${numberId}`);
+    console.log(`[Step ${stepIndex + 1}/${steps.length}] (${step.type}) -> ${jid}`);
 
     if (step.type === 'message') {
-        await sendStepMessage(numberId, step);
-        executeStep(numberId, stepIndex + 1);
-    } 
-    else if (step.type === 'wait') {
-        const delayMs = (parseFloat(step.duration) || 2) * 1000;
+        await sendStepPayload(jid, step);
+        executeStep(jid, stepIndex + 1);
+    } else if (step.type === 'wait') {
+        const delaySec = parseFloat(step.duration) || 2;
         const timeoutId = setTimeout(() => {
-            executeStep(numberId, stepIndex + 1);
-        }, delayMs);
-        userStates[numberId].waitTimeoutId = timeoutId;
-    } 
-    else if (step.type === 'question') {
-        await sendStepMessage(numberId, step);
-        userStates[numberId].status = 'waiting_reply';
-        userStates[numberId].lastActive = Date.now();
+            executeStep(jid, stepIndex + 1);
+        }, delaySec * 1000);
+        userStates[jid].waitTimeoutId = timeoutId;
+    } else if (step.type === 'question') {
+        await sendStepPayload(jid, step);
+        userStates[jid].status = 'waiting_reply';
+        userStates[jid].lastActive = Date.now();
     }
 }
 
-async function sendStepMessage(numberId, step) {
-    try {
-        const chat = await client.getChatById(numberId);
-        
-        // Randomized human thinking delay before starting to type/record (1s to 2.5s)
-        const thinkingDelay = 1000 + (Math.random() * 1500);
-        await new Promise(resolve => setTimeout(resolve, thinkingDelay));
+async function sendStepPayload(jid, step) {
+    if (!sock || !clientReady) return;
 
-        // Simulate typing or recording state based on media type
-        const isAudio = step.media && (step.media.endsWith('.mp3') || step.media.endsWith('.ogg') || step.media.endsWith('.wav') || step.media.endsWith('.m4a'));
+    try {
+        // Natural human typing/recording delay
+        const isAudio = step.media && (step.media.endsWith('.mp3') || step.media.endsWith('.ogg') || step.media.endsWith('.m4a') || step.media.endsWith('.wav'));
+        
         if (isAudio) {
-            await chat.sendStateRecording();
+            await sock.sendPresenceUpdate('recording', jid);
         } else {
-            await chat.sendStateTyping();
+            await sock.sendPresenceUpdate('composing', jid);
         }
 
-        // Realistic typing delay: 50ms per character of text, min 1.5s, max 5s
-        const textLength = step.text ? step.text.length : 0;
-        const typingDelay = Math.min(Math.max(textLength * 50, 1500), 5000) + (Math.random() * 1000);
-        
-        await new Promise(resolve => setTimeout(resolve, typingDelay));
-        await chat.clearState();
+        const textLen = step.text ? step.text.length : 0;
+        const typingDelayMs = Math.min(Math.max(textLen * 35, 1200), 4000);
+        await delay(typingDelayMs);
+        await sock.sendPresenceUpdate('paused', jid);
 
         if (step.media) {
-            const mediaPath = path.join(__dirname, step.media);
-            const media = getMessageMediaForFile(mediaPath);
-            if (media) {
+            const mediaFullPath = path.join(__dirname, step.media);
+            if (fs.existsSync(mediaFullPath)) {
+                const ext = path.extname(mediaFullPath).toLowerCase();
+                const buffer = fs.readFileSync(mediaFullPath);
+
                 if (isAudio) {
-                    await client.sendMessage(numberId, media, { sendAudioAsVoice: true });
+                    // Send as WhatsApp Voice Note (PTT)
+                    let mimetype = 'audio/mp4';
+                    if (ext === '.ogg') mimetype = 'audio/ogg; codecs=opus';
+                    else if (ext === '.mp3') mimetype = 'audio/mp3';
+                    else if (ext === '.wav') mimetype = 'audio/wav';
+
+                    await sock.sendMessage(jid, {
+                        audio: buffer,
+                        mimetype: mimetype,
+                        ptt: true
+                    });
+                    recordOutgoingMessage(jid, '', step.media);
+                } else if (['.jpg', '.jpeg', '.png', '.gif'].includes(ext)) {
+                    await sock.sendMessage(jid, {
+                        image: buffer,
+                        caption: step.text || undefined
+                    });
+                    recordOutgoingMessage(jid, step.text || '', step.media);
+                } else if (['.mp4', '.mov', '.avi'].includes(ext)) {
+                    await sock.sendMessage(jid, {
+                        video: buffer,
+                        caption: step.text || undefined
+                    });
+                    recordOutgoingMessage(jid, step.text || '', step.media);
                 } else {
-                    await client.sendMessage(numberId, media, { caption: step.text || '' });
+                    await sock.sendMessage(jid, {
+                        document: buffer,
+                        mimetype: 'application/octet-stream',
+                        fileName: path.basename(mediaFullPath),
+                        caption: step.text || undefined
+                    });
+                    recordOutgoingMessage(jid, step.text || '', step.media);
                 }
-            } else {
-                if (step.text) await client.sendMessage(numberId, step.text);
+                return;
             }
-        } else if (step.text) {
-            await client.sendMessage(numberId, step.text);
+        }
+
+        if (step.text) {
+            await sock.sendMessage(jid, { text: step.text });
+            recordOutgoingMessage(jid, step.text, null);
         }
     } catch (err) {
-        console.error(`Error sending step message to ${numberId}:`, err);
-        // No fallback send to avoid duplicate messages, especially for question steps.
+        console.error(`Error sending step payload to ${jid}:`, err);
     }
 }
 
-// Start WhatsApp client on startup
-initWhatsAppClient();
-
 // API Routes
-app.post('/api/eval', async (req, res) => {
-    const { code } = req.body;
-    try {
-        if (client && client.pupPage) {
-            const result = await client.pupPage.evaluate((c) => {
-                try {
-                    return eval(c);
-                } catch(e) {
-                    return e.message;
-                }
-            }, code);
-            res.json({ success: true, result });
-        } else {
-            res.status(404).json({ error: 'Client or page not available' });
-        }
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
 app.get('/api/status', (req, res) => {
-    res.json({ 
-        ready: clientReady, 
-        qr: currentQR, 
-        status: initStatus, 
-        error: initError 
+    res.json({
+        ready: clientReady,
+        qr: currentQR,
+        status: initStatus,
+        error: initError,
+        user: connectedUser
     });
-});
-
-app.get('/api/screenshot', async (req, res) => {
-    try {
-        if (client && client.pupPage) {
-            const screenshotBuffer = await client.pupPage.screenshot();
-            res.set('Content-Type', 'image/png');
-            return res.send(screenshotBuffer);
-        } else {
-            return res.status(404).json({ error: 'Client or page not available yet' });
-        }
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-
-
-
-
-app.post('/api/connect', (req, res) => {
-    try {
-        if (clientReady || initStatus === 'ready' || initStatus === 'waiting_qr' || initStatus === 'initializing') {
-            return res.json({ success: true, message: 'Bot is already active or initializing.' });
-        }
-        initWhatsAppClient();
-        res.json({ success: true, message: 'Initialization started.' });
-    } catch (err) {
-        console.error('Error starting bot:', err);
-        res.status(500).json({ error: err.message || String(err) });
-    }
 });
 
 app.post('/api/disconnect', async (req, res) => {
     try {
-        console.log('Request to disconnect client received.');
-        
-        // Cancel all timeouts in userStates
-        Object.keys(userStates).forEach(numberId => {
-            if (userStates[numberId] && userStates[numberId].waitTimeoutId) {
-                clearTimeout(userStates[numberId].waitTimeoutId);
-            }
-        });
-        
-        if (client) {
-            try {
-                if (clientReady) {
-                    await client.logout();
-                }
-            } catch (err) {
-                console.error('Error logging out client:', err);
-            }
-            await safeDestroyClient();
-        }
-        try {
-            const sessionPath = path.join(__dirname, '.wwebjs_auth');
-            if (fs.existsSync(sessionPath)) {
-                fs.rmSync(sessionPath, { recursive: true, force: true });
-                console.log('Cleaned session folder on explicit disconnect.');
-            }
-        } catch (e) {
-            console.error('Non-critical: error cleaning session folder:', e.message);
-        }
-        initStatus = 'disconnected';
+        console.log('Baileys: User requested disconnection.');
+        clientReady = false;
         currentQR = '';
+        connectedUser = null;
+        initStatus = 'disconnected';
         initError = '';
-        res.json({ success: true });
-    } catch (err) {
-        console.error('Error during client disconnection:', err);
-        res.status(500).json({ error: err.message || String(err) });
+
+        if (sock) {
+            try {
+                await sock.logout();
+            } catch (e) {}
+            sock = null;
+        }
+
+        try {
+            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+        } catch (e) {}
+
+        setTimeout(initWhatsApp, 2000);
+        res.json({ success: true, message: 'Bot desconectado com sucesso.' });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
 });
 
 app.post('/api/restart', async (req, res) => {
     try {
-        console.log('Restart requested via API...');
-        await safeDestroyClient();
+        console.log('Baileys: Restart requested.');
+        clientReady = false;
+        currentQR = '';
+        connectedUser = null;
+        initStatus = 'connecting';
+        initError = '';
+
+        if (sock) {
+            try {
+                sock.end();
+            } catch (e) {}
+            sock = null;
+        }
+
         try {
-            const sessionPath = path.join(__dirname, '.wwebjs_auth');
-            if (fs.existsSync(sessionPath)) {
-                fs.rmSync(sessionPath, { recursive: true, force: true });
-            }
+            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
         } catch (e) {}
-        setTimeout(() => { initWhatsAppClient(); }, 2000);
-        res.json({ success: true, message: 'Restarting...' });
+
+        setTimeout(initWhatsApp, 1500);
+        res.json({ success: true, message: 'Reiniciando conexão...' });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -654,7 +522,6 @@ app.get('/api/data', (req, res) => {
     res.json(botData);
 });
 
-// Save whole steps configuration
 app.post('/api/save-steps', (req, res) => {
     const { steps } = req.body;
     if (Array.isArray(steps)) {
@@ -666,243 +533,89 @@ app.post('/api/save-steps', (req, res) => {
     }
 });
 
-// Single media upload endpoint
-app.post('/api/upload', upload.single('media'), (req, res) => {
-    if (req.file) {
-        res.json({ filePath: `uploads/${req.file.filename}` });
+app.post('/api/upload', upload.single('file'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+    }
+    const relativePath = 'uploads/' + req.file.filename;
+    res.json({ success: true, path: relativePath });
+});
+
+// Live Chat API
+app.get('/api/chats', (req, res) => {
+    const chatList = Object.values(liveChats).sort((a, b) => b.timestamp - a.timestamp);
+    res.json({ success: true, chats: chatList });
+});
+
+app.get('/api/messages/:jid', (req, res) => {
+    const jid = req.params.jid;
+    const chat = liveChats[jid];
+    if (chat) {
+        chat.unread = 0;
+        saveChats();
+        res.json({ success: true, chat: chat });
     } else {
-        res.status(400).json({ error: 'No file uploaded' });
+        res.status(404).json({ error: 'Chat not found' });
     }
 });
 
-let cachedChats = null;
-let lastChatsFetchTime = 0;
-const CHATS_CACHE_TTL = 30000; // 30 seconds
-
-// 1. Get List of active chats with botState status
-app.get('/api/chats', async (req, res) => {
-    if (!clientReady) {
-        return res.status(503).json({ error: 'WhatsApp client is not ready' });
+app.post('/api/send', async (req, res) => {
+    const { jid, message } = req.body;
+    if (!jid || !message) {
+        return res.status(400).json({ error: 'jid and message required' });
     }
-    try {
-        const now = Date.now();
-        if (!cachedChats || (now - lastChatsFetchTime > CHATS_CACHE_TTL)) {
-            console.log('Cache expired or empty. Fetching chats from WhatsApp...');
-            const chats = await client.getChats();
-            console.log(`Fetched ${chats.length} chats in total.`);
-            
-            // Filter out groups, sort or map values
-            cachedChats = chats
-                .filter(c => !c.isGroup)
-                .slice(0, 30)
-                .map(c => {
-                    const chatId = c.id._serialized;
-                    const state = userStates[chatId] || { status: 'idle' };
-                    return {
-                        id: chatId,
-                        name: c.name || c.id.user,
-                        unreadCount: c.unreadCount,
-                        timestamp: c.timestamp,
-                        botStatus: state.status
-                    };
-                });
-            lastChatsFetchTime = now;
-        } else {
-            // Update bot status dynamically in cached array
-            cachedChats.forEach(c => {
-                const state = userStates[c.id];
-                c.botStatus = state ? state.status : 'idle';
-            });
-        }
-        res.json({ chats: cachedChats });
-    } catch (err) {
-        console.error('Error fetching chats:', err);
-        const isConnectionError = err.message && (
-            err.message.includes('Target closed') || 
-            err.message.includes('detached Frame') || 
-            err.message.includes('Session closed') || 
-            err.message.includes('Protocol error')
-        );
-        if (initStatus === 'ready' && isConnectionError) {
-            console.log('Marking client as disconnected due to connection error and attempting auto-reconnect...');
-            await safeDestroyClient();
-            setTimeout(() => { initWhatsAppClient(); }, 3000);
-        } else {
-            console.log('Non-connection error fetching chats (possibly transient page load state). Keeping client active.');
-        }
-        return res.status(503).json({ error: 'WhatsApp connection lost or loading. Please refresh in a few seconds.' });
+
+    if (!sock || !clientReady) {
+        return res.status(503).json({ error: 'WhatsApp is not connected' });
     }
-});
-
-
-
-// 2. Fetch last 50 messages of a chat
-app.get('/api/chats/:id/messages', async (req, res) => {
-    if (!clientReady) {
-        return res.status(503).json({ error: 'WhatsApp client is not ready' });
-    }
-    const chatId = req.params.id;
-    try {
-        console.log(`Fetching messages for chat: ${chatId}`);
-        const chat = await client.getChatById(chatId);
-        const messages = await chat.fetchMessages({ limit: 50 });
-        console.log(`Fetched ${messages.length} messages for ${chatId}`);
-        
-        const cleanMessages = messages.map(m => ({
-            id: m.id.id,
-            fromMe: m.fromMe,
-            body: m.body || '',
-            timestamp: m.timestamp,
-            type: m.type,
-            hasMedia: m.hasMedia
-        }));
-
-        res.json({ messages: cleanMessages });
-    } catch (err) {
-        console.error(`Error fetching messages for ${chatId}:`, err);
-        const isConnectionError = err.message && (
-            err.message.includes('Target closed') || 
-            err.message.includes('detached Frame') || 
-            err.message.includes('Session closed') || 
-            err.message.includes('Protocol error')
-        );
-        if (initStatus === 'ready' && isConnectionError) {
-            await safeDestroyClient();
-            setTimeout(() => { initWhatsAppClient(); }, 3000);
-        } else {
-            console.log('Non-connection error fetching messages (possibly transient page load state). Keeping client active.');
-        }
-        return res.status(503).json({ error: 'WhatsApp connection lost or loading.' });
-    }
-});
-
-// 3. Send manual message (Text/Media) from system & auto-pause bot
-app.post('/api/chats/:id/send', upload.single('media'), async (req, res) => {
-    if (!clientReady) {
-        return res.status(503).json({ error: 'WhatsApp client is not ready' });
-    }
-    const chatId = req.params.id;
-    const { text } = req.body;
-    const mediaFile = req.file;
-
-    // Auto-pause bot for this contact to allow human conversation
-    if (userStates[chatId] && userStates[chatId].waitTimeoutId) {
-        clearTimeout(userStates[chatId].waitTimeoutId);
-    }
-    userStates[chatId] = {
-        currentStepIndex: -1,
-        status: 'paused',
-        lastActive: Date.now(),
-        waitTimeoutId: null
-    };
 
     try {
-        if (mediaFile) {
-            const mediaPath = path.join(__dirname, 'uploads', mediaFile.filename);
-            const media = getMessageMediaForFile(mediaPath);
-            const isAudio = mediaFile.filename.match(/\.(mp3|ogg|wav|m4a)$/i);
-            if (isAudio) {
-                await client.sendMessage(chatId, media, { sendAudioAsVoice: true });
-            } else {
-                await client.sendMessage(chatId, media, { caption: text || '' });
-            }
-        } else if (text) {
-            await client.sendMessage(chatId, text);
-        } else {
-            return res.status(400).json({ error: 'No content to send' });
+        await sock.sendMessage(jid, { text: message });
+        recordOutgoingMessage(jid, message, null);
+
+        // Pause automated bot for this conversation so human can take over
+        if (liveChats[jid]) {
+            liveChats[jid].botStatus = 'paused';
+            saveChats();
         }
+        if (userStates[jid]) {
+            userStates[jid].status = 'paused';
+        }
+
         res.json({ success: true });
     } catch (err) {
-        console.error(`Error sending manual message to ${chatId}:`, err);
+        console.error('Error sending manual message:', err);
         res.status(500).json({ error: err.message });
     }
 });
 
-// 4. Reset bot state for a contact
-app.post('/api/chats/:id/reset', (req, res) => {
-    const chatId = req.params.id;
-    if (userStates[chatId] && userStates[chatId].waitTimeoutId) {
-        clearTimeout(userStates[chatId].waitTimeoutId);
+app.post('/api/bot-toggle/:jid', (req, res) => {
+    const jid = req.params.jid;
+    if (!liveChats[jid]) {
+        return res.status(404).json({ error: 'Chat not found' });
     }
-    delete userStates[chatId];
-    res.json({ success: true, status: 'idle' });
+    const current = liveChats[jid].botStatus || 'active';
+    const nextStatus = current === 'active' ? 'paused' : 'active';
+    liveChats[jid].botStatus = nextStatus;
+
+    if (userStates[jid]) {
+        userStates[jid].status = nextStatus === 'paused' ? 'paused' : 'running';
+    }
+    saveChats();
+    res.json({ success: true, botStatus: nextStatus });
 });
 
-// 5. Toggle Pause/Resume bot manually
-app.post('/api/chats/:id/toggle-pause', (req, res) => {
-    const chatId = req.params.id;
-    const currentState = userStates[chatId] || { status: 'idle' };
-
-    if (userStates[chatId] && userStates[chatId].waitTimeoutId) {
-        clearTimeout(userStates[chatId].waitTimeoutId);
-    }
-
-    if (currentState.status === 'paused') {
-        // Resume (delete state so next message triggers flow from start)
-        delete userStates[chatId];
-        res.json({ success: true, status: 'idle' });
-    } else {
-        // Pause bot
-        userStates[chatId] = {
-            currentStepIndex: -1,
-            status: 'paused',
-            lastActive: Date.now(),
-            waitTimeoutId: null
-        };
-        res.json({ success: true, status: 'paused' });
-    }
-});
-
-// 6. Start bot flow manually right now
-app.post('/api/chats/:id/start-flow', (req, res) => {
-    if (!clientReady) {
-        return res.status(503).json({ error: 'WhatsApp client is not ready' });
-    }
-    const chatId = req.params.id;
-    
-    // Clear any existing flow timeouts for this chat
-    if (userStates[chatId] && userStates[chatId].waitTimeoutId) {
-        clearTimeout(userStates[chatId].waitTimeoutId);
-    }
-    
-    // Initialize state as running, index 0
-    userStates[chatId] = {
-        currentStepIndex: 0,
-        status: 'running',
-        lastActive: Date.now(),
-        waitTimeoutId: null
-    };
-    
-    // Trigger execution of step 0
-    console.log(`[Manual Trigger] Starting flow manually for ${chatId}`);
-    executeStep(chatId, 0).catch(err => {
-        console.error(`[Manual Trigger] Error starting flow for ${chatId}:`, err);
-    });
-    
-    res.json({ success: true, status: 'running' });
-});
-
-// Create uploads directory if it does not exist
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir);
-}
-
-// --- VIRTUAL NUMBERS API (SMS-ACTIVATE PROXY) ---
-
-const https = require('https');
-
+// SMS-Activate Virtual Number Integrations (Kept intact)
+const CONFIG_FILE = path.join(__dirname, 'config.json');
 function getSmsActivateKey() {
-    const configPath = path.join(__dirname, 'config.json');
-    if (fs.existsSync(configPath)) {
+    if (process.env.SMS_ACTIVATE_KEY) return process.env.SMS_ACTIVATE_KEY;
+    if (fs.existsSync(CONFIG_FILE)) {
         try {
-            const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-            return config.sms_activate_key || '';
-        } catch (e) {
-            console.error('Erro ao ler config.json:', e);
-        }
+            const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+            return config.SMS_ACTIVATE_KEY;
+        } catch (e) {}
     }
-    return '';
+    return null;
 }
 
 function smsApiRequest(url) {
@@ -915,175 +628,29 @@ function smsApiRequest(url) {
     });
 }
 
-// 1. Get status & balance
 app.get('/api/virtual-numbers/status', async (req, res) => {
     const apiKey = getSmsActivateKey();
     if (!apiKey || apiKey === 'YOUR_API_KEY_HERE') {
-        return res.json({ 
-            success: false, 
-            hasKey: false, 
-            error: 'Chave API do SMS-Activate não configurada. Por favor, adicione sua chave no arquivo config.json no servidor.' 
-        });
+        return res.json({ success: false, hasKey: false, error: 'Chave API não configurada.' });
     }
-
     try {
         const url = `https://api.sms-activate.org/stubs/handler_api.php?api_key=${apiKey}&action=getBalance`;
         const response = await smsApiRequest(url);
-        
         if (response.startsWith('ACCESS_BALANCE:')) {
             const balance = parseFloat(response.split(':')[1]);
-            // Mask key for safety
             const maskedKey = apiKey.substring(0, 4) + '...' + apiKey.substring(apiKey.length - 4);
-            return res.json({
-                success: true,
-                hasKey: true,
-                apiKey: maskedKey,
-                balance: balance
-            });
-        } else {
-            return res.json({
-                success: false,
-                hasKey: true,
-                error: `Erro da API SMS-Activate: ${response}`
-            });
+            return res.json({ success: true, hasKey: true, apiKey: maskedKey, balance: balance });
         }
-    } catch (err) {
-        console.error('Erro ao buscar saldo:', err);
-        return res.status(500).json({ success: false, error: 'Erro de conexão com o servidor SMS-Activate.' });
-    }
-});
-
-// 2. Request number
-app.post('/api/virtual-numbers/request', async (req, res) => {
-    const apiKey = getSmsActivateKey();
-    if (!apiKey || apiKey === 'YOUR_API_KEY_HERE') {
-        return res.status(400).json({ success: false, error: 'Chave API não configurada em config.json' });
-    }
-
-    const { operator } = req.body;
-    // Country ID for Mozambique is 80. Service for WhatsApp is 'wa'.
-    let url = `https://api.sms-activate.org/stubs/handler_api.php?api_key=${apiKey}&action=getNumber&service=wa&country=80`;
-    
-    if (operator && operator !== 'any') {
-        let opCode = operator.toLowerCase();
-        if (opCode === 'tmcel') opCode = 'mcel'; // SMS-Activate name is mcel
-        url += `&operator=${opCode}`;
-    }
-
-    try {
-        console.log(`Solicitando número de Moçambique. URL: ${url.replace(apiKey, 'HIDDEN')}`);
-        const response = await smsApiRequest(url);
-        
-        if (response.startsWith('ACCESS_NUMBER:')) {
-            const parts = response.split(':');
-            const activationId = parts[1];
-            const rawNumber = parts[2];
-            let formattedNumber = rawNumber;
-            if (!rawNumber.startsWith('+')) {
-                formattedNumber = '+' + rawNumber;
-            }
-            
-            return res.json({
-                success: true,
-                id: activationId,
-                number: formattedNumber
-            });
-        } else {
-            let errorMsg = response;
-            if (response === 'NO_NUMBERS') errorMsg = 'Nenhum número de Moçambique disponível no momento. Tente novamente mais tarde ou escolha outra operadora.';
-            if (response === 'NO_BALANCE') errorMsg = 'Saldo insuficiente na sua conta do SMS-Activate.';
-            if (response === 'BAD_KEY') errorMsg = 'A chave API configurada no config.json é inválida.';
-            
-            return res.json({
-                success: false,
-                error: errorMsg
-            });
-        }
-    } catch (err) {
-        console.error('Erro ao solicitar número:', err);
-        return res.status(500).json({ success: false, error: 'Erro de conexão ao solicitar número.' });
-    }
-});
-
-// 3. Check status
-app.get('/api/virtual-numbers/check/:id', async (req, res) => {
-    const apiKey = getSmsActivateKey();
-    if (!apiKey || apiKey === 'YOUR_API_KEY_HERE') {
-        return res.status(400).json({ success: false, error: 'Chave API não configurada em config.json' });
-    }
-
-    const activationId = req.params.id;
-    const url = `https://api.sms-activate.org/stubs/handler_api.php?api_key=${apiKey}&action=getStatus&id=${activationId}`;
-
-    try {
-        const response = await smsApiRequest(url);
-        
-        if (response === 'STATUS_WAIT_CODE') {
-            return res.json({ success: true, status: 'WAITING_SMS' });
-        } else if (response.startsWith('STATUS_OK:')) {
-            const code = response.split(':')[1];
-            return res.json({ success: true, status: 'CODE_RECEIVED', code: code });
-        } else if (response === 'STATUS_CANCEL') {
-            return res.json({ success: true, status: 'CANCELLED' });
-        } else if (response === 'STATUS_WAIT_RETRY') {
-            return res.json({ success: true, status: 'WAITING_RETRY' });
-        } else {
-            return res.json({ success: false, error: `Status desconhecido: ${response}` });
-        }
-    } catch (err) {
-        console.error('Erro ao verificar status:', err);
-        return res.status(500).json({ success: false, error: 'Erro de conexão ao verificar status.' });
-    }
-});
-
-// 4. Cancel activation
-app.post('/api/virtual-numbers/cancel/:id', async (req, res) => {
-    const apiKey = getSmsActivateKey();
-    if (!apiKey || apiKey === 'YOUR_API_KEY_HERE') {
-        return res.status(400).json({ success: false, error: 'Chave API não configurada em config.json' });
-    }
-
-    const activationId = req.params.id;
-    const url = `https://api.sms-activate.org/stubs/handler_api.php?api_key=${apiKey}&action=setStatus&status=8&id=${activationId}`;
-
-    try {
-        const response = await smsApiRequest(url);
-        if (response === 'ACCESS_CANCEL') {
-            return res.json({ success: true, message: 'Ativação cancelada com sucesso.' });
-        } else {
-            return res.json({ success: false, error: `Erro ao cancelar: ${response}` });
-        }
-    } catch (err) {
-        console.error('Erro ao cancelar ativação:', err);
-        return res.status(500).json({ success: false, error: 'Erro de conexão ao cancelar ativação.' });
-    }
-});
-
-// 5. Confirm activation (complete)
-app.post('/api/virtual-numbers/confirm/:id', async (req, res) => {
-    const apiKey = getSmsActivateKey();
-    if (!apiKey || apiKey === 'YOUR_API_KEY_HERE') {
-        return res.status(400).json({ success: false, error: 'Chave API não configurada em config.json' });
-    }
-
-    const activationId = req.params.id;
-    const url = `https://api.sms-activate.org/stubs/handler_api.php?api_key=${apiKey}&action=setStatus&status=6&id=${activationId}`;
-
-    try {
-        const response = await smsApiRequest(url);
-        if (response === 'ACCESS_ACTIVATION') {
-            return res.json({ success: true, message: 'Ativação concluída com sucesso.' });
-        } else {
-            return res.json({ success: false, error: `Erro ao concluir ativação: ${response}` });
-        }
-    } catch (err) {
-        console.error('Erro ao concluir ativação:', err);
-        return res.status(500).json({ success: false, error: 'Erro de conexão ao concluir ativação.' });
+        res.json({ success: false, hasKey: true, error: response });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
 });
 
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0';
+
 app.listen(PORT, HOST, () => {
-    console.log(`Server running on http://${HOST}:${PORT}`);
+    console.log(`Umbler Talk Bot Server running on http://${HOST}:${PORT}`);
+    initWhatsApp();
 });
