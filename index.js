@@ -706,13 +706,16 @@ async function sendStepPayload(jid, step) {
                 const buffer = fs.readFileSync(mediaFullPath);
 
                 if (isAudio) {
-                    const audioInfo = await convertToUniversalAudio(mediaFullPath, 'mp3');
+                    const audioInfo = await convertToUniversalAudio(mediaFullPath, 'm4a');
                     const audioBuffer = fs.readFileSync(audioInfo.path);
+                    const wave = generateWaveform();
 
                     await sock.sendMessage(jid, {
                         audio: audioBuffer,
-                        mimetype: audioInfo.mimetype,
-                        seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined
+                        mimetype: 'audio/mp4',
+                        ptt: true,
+                        seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined,
+                        waveform: wave
                     });
                     recordOutgoingMessage(jid, '', step.media);
                     mediaSent = true;
@@ -812,7 +815,8 @@ app.get('/api/send-test-audio', async (req, res) => {
         }
         const file = req.query.file || 'uploads/1791251073918.ogg';
         const fullPath = path.join(__dirname, file);
-        const format = req.query.format || 'mp3'; // 'mp3', 'm4a', 'ptt'
+        const format = req.query.format || 'm4a'; // 'm4a', 'mp3', 'ptt'
+        const isPtt = req.query.ptt === 'false' ? false : true;
 
         let sent;
         if (format === 'ptt') {
@@ -826,17 +830,20 @@ app.get('/api/send-test-audio', async (req, res) => {
                 seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined,
                 waveform: wave
             });
-            res.json({ success: true, jid, format: 'ptt', file: audioInfo.path, duration: audioInfo.seconds, messageId: sent?.key?.id });
+            res.json({ success: true, jid, format: 'ptt', ptt: true, file: audioInfo.path, duration: audioInfo.seconds, messageId: sent?.key?.id });
         } else {
-            const targetFormat = format === 'm4a' ? 'm4a' : 'mp3';
+            const targetFormat = format === 'mp3' ? 'mp3' : 'm4a';
             const audioInfo = await convertToUniversalAudio(fullPath, targetFormat);
             const buf = fs.readFileSync(audioInfo.path);
+            const wave = generateWaveform();
             sent = await sock.sendMessage(jid, {
                 audio: buf,
-                mimetype: audioInfo.mimetype,
-                seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined
+                mimetype: targetFormat === 'm4a' ? 'audio/mp4' : 'audio/mpeg',
+                ptt: isPtt,
+                seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined,
+                waveform: wave
             });
-            res.json({ success: true, jid, format: targetFormat, file: audioInfo.path, duration: audioInfo.seconds, messageId: sent?.key?.id });
+            res.json({ success: true, jid, format: targetFormat, ptt: isPtt, file: audioInfo.path, duration: audioInfo.seconds, messageId: sent?.key?.id });
         }
     } catch (e) {
         res.status(500).json({ error: e.message });
