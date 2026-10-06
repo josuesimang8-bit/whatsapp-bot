@@ -99,6 +99,44 @@ function generateWaveform() {
     return wave;
 }
 
+function convertToUniversalAudio(inputPath, targetFormat = 'mp3') {
+    return new Promise((resolve) => {
+        if (!fs.existsSync(inputPath)) return resolve({ path: inputPath, seconds: 0, mimetype: 'audio/mpeg' });
+        const dir = path.dirname(inputPath);
+        const ext = path.extname(inputPath);
+        const base = path.basename(inputPath, ext);
+        const outExt = targetFormat === 'm4a' ? '.m4a' : '.mp3';
+        const outputPath = path.join(dir, `${base}_universal${outExt}`);
+        const mimetype = targetFormat === 'm4a' ? 'audio/mp4' : 'audio/mpeg';
+
+        if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 1000) {
+            const probeCmd = `ffprobe -i "${outputPath}" -show_entries format=duration -v quiet -of csv="p=0"`;
+            return exec(probeCmd, (probeErr, probeOut) => {
+                const dur = Math.max(Math.round(parseFloat(probeOut) || 0), 1);
+                resolve({ path: outputPath, seconds: dur, mimetype });
+            });
+        }
+
+        const codec = targetFormat === 'm4a' ? '-c:a aac -b:a 128k' : '-c:a libmp3lame -b:a 128k';
+        const cmd = `ffmpeg -y -i "${inputPath}" -vn ${codec} -ar 44100 "${outputPath}"`;
+        console.log(`[FFmpeg Universal Audio] Converting ${inputPath} -> ${outputPath}`);
+
+        exec(cmd, (err) => {
+            if (err) {
+                console.error(`Audio conversion to ${targetFormat} failed for ${inputPath}:`, err.message);
+                resolve({ path: inputPath, seconds: 0, mimetype: 'audio/mpeg' });
+            } else {
+                console.log(`[FFmpeg Universal Audio] Converted successfully: ${outputPath}`);
+                const probeCmd = `ffprobe -i "${outputPath}" -show_entries format=duration -v quiet -of csv="p=0"`;
+                exec(probeCmd, (probeErr, probeOut) => {
+                    const dur = Math.max(Math.round(parseFloat(probeOut) || 0), 1);
+                    resolve({ path: outputPath, seconds: dur, mimetype });
+                });
+            }
+        });
+    });
+}
+
 async function preConvertAudios() {
     try {
         const steps = botData.steps || [];
@@ -668,16 +706,13 @@ async function sendStepPayload(jid, step) {
                 const buffer = fs.readFileSync(mediaFullPath);
 
                 if (isAudio) {
-                    const audioInfo = await convertToWhatsAppOpus(mediaFullPath);
+                    const audioInfo = await convertToUniversalAudio(mediaFullPath, 'mp3');
                     const audioBuffer = fs.readFileSync(audioInfo.path);
-                    const wave = generateWaveform();
 
                     await sock.sendMessage(jid, {
                         audio: audioBuffer,
-                        mimetype: 'audio/ogg; codecs=opus',
-                        ptt: true,
-                        seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined,
-                        waveform: wave
+                        mimetype: audioInfo.mimetype,
+                        seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined
                     });
                     recordOutgoingMessage(jid, '', step.media);
                     mediaSent = true;
@@ -777,19 +812,32 @@ app.get('/api/send-test-audio', async (req, res) => {
         }
         const file = req.query.file || 'uploads/1791251073918.ogg';
         const fullPath = path.join(__dirname, file);
-        const audioInfo = await convertToWhatsAppOpus(fullPath);
-        const buf = fs.readFileSync(audioInfo.path);
-        const wave = generateWaveform();
-        const mode = req.query.mode || 'ptt'; // 'ptt' or 'audio'
+        const format = req.query.format || 'mp3'; // 'mp3', 'm4a', 'ptt'
 
-        const sent = await sock.sendMessage(jid, {
-            audio: buf,
-            mimetype: 'audio/ogg; codecs=opus',
-            ptt: mode === 'ptt',
-            seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined,
-            waveform: wave
-        });
-        res.json({ success: true, jid, mode, file: audioInfo.path, duration: audioInfo.seconds, messageId: sent?.key?.id });
+        let sent;
+        if (format === 'ptt') {
+            const audioInfo = await convertToWhatsAppOpus(fullPath);
+            const buf = fs.readFileSync(audioInfo.path);
+            const wave = generateWaveform();
+            sent = await sock.sendMessage(jid, {
+                audio: buf,
+                mimetype: 'audio/ogg; codecs=opus',
+                ptt: true,
+                seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined,
+                waveform: wave
+            });
+            res.json({ success: true, jid, format: 'ptt', file: audioInfo.path, duration: audioInfo.seconds, messageId: sent?.key?.id });
+        } else {
+            const targetFormat = format === 'm4a' ? 'm4a' : 'mp3';
+            const audioInfo = await convertToUniversalAudio(fullPath, targetFormat);
+            const buf = fs.readFileSync(audioInfo.path);
+            sent = await sock.sendMessage(jid, {
+                audio: buf,
+                mimetype: audioInfo.mimetype,
+                seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined
+            });
+            res.json({ success: true, jid, format: targetFormat, file: audioInfo.path, duration: audioInfo.seconds, messageId: sent?.key?.id });
+        }
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
