@@ -45,37 +45,45 @@ loadData();
 
 // WhatsApp Voice Note (PTT) Audio Converter
 // WhatsApp strictly requires OGG container with Opus codec at 48000Hz mono.
-// Any Vorbis, MP3, or non-Opus audio causes "Não foi possível reproduzir este áudio. Peça para reenviar".
+// Uses -avoid_negative_ts make_zero to fix stream timestamps so WhatsApp client downloads cleanly.
 function convertToWhatsAppOpus(inputPath) {
     return new Promise((resolve) => {
         if (!fs.existsSync(inputPath)) {
-            return resolve(inputPath);
+            return resolve({ path: inputPath, seconds: 0 });
         }
 
         const dir = path.dirname(inputPath);
         const ext = path.extname(inputPath);
         const base = path.basename(inputPath, ext);
-        const outputPath = path.join(dir, `${base}_wa_opus.ogg`);
+        const outputPath = path.join(dir, `${base}_whatsapp_opus.ogg`);
 
         if (fs.existsSync(outputPath)) {
             try {
                 const stats = fs.statSync(outputPath);
                 if (stats.size > 1000) {
-                    return resolve(outputPath);
+                    const probeCmd = `ffprobe -i "${outputPath}" -show_entries format=duration -v quiet -of csv="p=0"`;
+                    return exec(probeCmd, (probeErr, probeOut) => {
+                        const dur = Math.max(Math.round(parseFloat(probeOut) || 0), 1);
+                        resolve({ path: outputPath, seconds: dur });
+                    });
                 }
             } catch (e) {}
         }
 
-        const cmd = `ffmpeg -y -i "${inputPath}" -c:a libopus -ar 48000 -ac 1 -b:a 48k "${outputPath}"`;
+        const cmd = `ffmpeg -y -i "${inputPath}" -vn -c:a libopus -b:a 32k -vbr on -ar 48000 -ac 1 -avoid_negative_ts make_zero "${outputPath}"`;
         console.log(`[FFmpeg] Converting audio for WhatsApp Opus PTT: ${inputPath} -> ${outputPath}`);
 
         exec(cmd, (err, stdout, stderr) => {
             if (err) {
                 console.error(`[FFmpeg Error] Audio conversion failed for ${inputPath}:`, err.message);
-                resolve(inputPath);
+                resolve({ path: inputPath, seconds: 0 });
             } else {
                 console.log(`[FFmpeg Success] Audio successfully converted to WhatsApp Opus: ${outputPath}`);
-                resolve(outputPath);
+                const probeCmd = `ffprobe -i "${outputPath}" -show_entries format=duration -v quiet -of csv="p=0"`;
+                exec(probeCmd, (probeErr, probeOut) => {
+                    const dur = Math.max(Math.round(parseFloat(probeOut) || 0), 1);
+                    resolve({ path: outputPath, seconds: dur });
+                });
             }
         });
     });
@@ -650,13 +658,14 @@ async function sendStepPayload(jid, step) {
                 const buffer = fs.readFileSync(mediaFullPath);
 
                 if (isAudio) {
-                    const finalAudioPath = await convertToWhatsAppOpus(mediaFullPath);
-                    const audioBuffer = fs.readFileSync(finalAudioPath);
+                    const audioInfo = await convertToWhatsAppOpus(mediaFullPath);
+                    const audioBuffer = fs.readFileSync(audioInfo.path);
 
                     await sock.sendMessage(jid, {
                         audio: audioBuffer,
                         mimetype: 'audio/ogg; codecs=opus',
-                        ptt: true
+                        ptt: true,
+                        seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined
                     });
                     recordOutgoingMessage(jid, '', step.media);
                     mediaSent = true;
@@ -723,6 +732,23 @@ app.get('/api/status', (req, res) => {
         error: initError,
         user: connectedUser
     });
+});
+
+app.get('/api/test-audio', async (req, res) => {
+    const file = req.query.file || 'uploads/1791248087020.ogg';
+    const fullPath = path.join(__dirname, file);
+    try {
+        const result = await convertToWhatsAppOpus(fullPath);
+        res.json({
+            success: true,
+            file,
+            result,
+            exists: fs.existsSync(result.path),
+            size: fs.existsSync(result.path) ? fs.statSync(result.path).size : 0
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.post('/api/disconnect', async (req, res) => {
