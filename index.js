@@ -945,6 +945,9 @@ app.get('/api/virtual-numbers/status', async (req, res) => {
     }
 });
 
+const PORT = process.env.PORT || 3000;
+const HOST = '0.0.0.0';
+
 // Keep-alive timer to prevent Render free instance from sleeping
 function startAntiSleep() {
     const url = process.env.RENDER_EXTERNAL_URL || 'https://whatsapp-bot-xnae.onrender.com';
