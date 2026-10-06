@@ -14,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
 const https = require('https');
+const { exec } = require('child_process');
 
 const app = express();
 app.use(cors());
@@ -41,6 +42,66 @@ function saveData() {
 }
 
 loadData();
+
+// WhatsApp Voice Note (PTT) Audio Converter
+// WhatsApp strictly requires OGG container with Opus codec at 48000Hz mono.
+// Any Vorbis, MP3, or non-Opus audio causes "Não foi possível reproduzir este áudio. Peça para reenviar".
+function convertToWhatsAppOpus(inputPath) {
+    return new Promise((resolve) => {
+        if (!fs.existsSync(inputPath)) {
+            return resolve(inputPath);
+        }
+
+        const dir = path.dirname(inputPath);
+        const ext = path.extname(inputPath);
+        const base = path.basename(inputPath, ext);
+        const outputPath = path.join(dir, `${base}_wa_opus.ogg`);
+
+        if (fs.existsSync(outputPath)) {
+            try {
+                const stats = fs.statSync(outputPath);
+                if (stats.size > 1000) {
+                    return resolve(outputPath);
+                }
+            } catch (e) {}
+        }
+
+        const cmd = `ffmpeg -y -i "${inputPath}" -c:a libopus -ar 48000 -ac 1 -b:a 48k "${outputPath}"`;
+        console.log(`[FFmpeg] Converting audio for WhatsApp Opus PTT: ${inputPath} -> ${outputPath}`);
+
+        exec(cmd, (err, stdout, stderr) => {
+            if (err) {
+                console.error(`[FFmpeg Error] Audio conversion failed for ${inputPath}:`, err.message);
+                resolve(inputPath);
+            } else {
+                console.log(`[FFmpeg Success] Audio successfully converted to WhatsApp Opus: ${outputPath}`);
+                resolve(outputPath);
+            }
+        });
+    });
+}
+
+async function preConvertAudios() {
+    try {
+        const steps = botData.steps || [];
+        for (const step of steps) {
+            if (step.media) {
+                const ext = path.extname(step.media).toLowerCase();
+                if (['.ogg', '.mp3', '.m4a', '.wav', '.aac', '.wma'].includes(ext)) {
+                    const fullPath = path.join(__dirname, step.media);
+                    if (fs.existsSync(fullPath)) {
+                        await convertToWhatsAppOpus(fullPath);
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        console.error('Error during audio pre-conversion:', e);
+    }
+}
+
+// Pre-convert audios on startup in background
+setTimeout(preConvertAudios, 2000);
 
 // Live Chat History Storage
 const CHATS_FILE = path.join(__dirname, 'live_chats.json');
@@ -562,14 +623,12 @@ async function sendStepPayload(jid, step) {
                 const buffer = fs.readFileSync(mediaFullPath);
 
                 if (isAudio) {
-                    let mimetype = 'audio/mp4';
-                    if (ext === '.ogg') mimetype = 'audio/ogg; codecs=opus';
-                    else if (ext === '.mp3') mimetype = 'audio/mp3';
-                    else if (ext === '.wav') mimetype = 'audio/wav';
+                    const finalAudioPath = await convertToWhatsAppOpus(mediaFullPath);
+                    const audioBuffer = fs.readFileSync(finalAudioPath);
 
                     await sock.sendMessage(jid, {
-                        audio: buffer,
-                        mimetype: mimetype,
+                        audio: audioBuffer,
+                        mimetype: 'audio/ogg; codecs=opus',
                         ptt: true
                     });
                     recordOutgoingMessage(jid, '', step.media);
@@ -708,11 +767,23 @@ app.post('/api/save-steps', (req, res) => {
     }
 });
 
-app.post('/api/upload', upload.single('file'), (req, res) => {
+app.post('/api/upload', upload.single('file'), async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No file uploaded' });
     }
     const relativePath = 'uploads/' + req.file.filename;
+    const fullPath = path.join(__dirname, relativePath);
+
+    // If uploaded file is audio, pre-convert to WhatsApp Opus
+    const ext = path.extname(req.file.filename).toLowerCase();
+    if (['.ogg', '.mp3', '.m4a', '.wav', '.aac', '.wma'].includes(ext)) {
+        try {
+            await convertToWhatsAppOpus(fullPath);
+        } catch (e) {
+            console.error('Audio conversion on upload failed:', e);
+        }
+    }
+
     res.json({ success: true, path: relativePath });
 });
 
