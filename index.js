@@ -583,13 +583,28 @@ async function sendStepPayload(jid, step) {
                     mediaSent = true;
                     return;
                 } else if (['.mp4', '.mov', '.avi'].includes(ext)) {
-                    await sock.sendMessage(jid, {
-                        video: buffer,
-                        caption: step.text || undefined
-                    });
-                    recordOutgoingMessage(jid, step.text || '', step.media);
-                    mediaSent = true;
-                    return;
+                    try {
+                        console.log(`[Baileys Video] Sending video to ${jid} (${step.media})`);
+                        await sock.sendMessage(jid, {
+                            video: buffer,
+                            mimetype: 'video/mp4',
+                            caption: step.text || undefined
+                        });
+                        recordOutgoingMessage(jid, step.text || '', step.media);
+                        mediaSent = true;
+                        return;
+                    } catch (vidErr) {
+                        console.error(`[Baileys Video Error] Failed to send native video, falling back to document:`, vidErr);
+                        await sock.sendMessage(jid, {
+                            document: buffer,
+                            mimetype: 'video/mp4',
+                            fileName: path.basename(mediaFullPath),
+                            caption: step.text || undefined
+                        });
+                        recordOutgoingMessage(jid, step.text || '', step.media);
+                        mediaSent = true;
+                        return;
+                    }
                 } else {
                     await sock.sendMessage(jid, {
                         document: buffer,
