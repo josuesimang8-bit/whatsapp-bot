@@ -151,17 +151,34 @@ let readyTimestamp = Math.floor(Date.now() / 1000);
 
 const AUTH_DIR = path.join(__dirname, 'auth_info_baileys');
 const logger = pino({ level: 'silent' });
+let isInitializing = false;
+
+function cleanCloseSock() {
+    if (sock) {
+        try {
+            sock.ev.removeAllListeners('connection.update');
+            sock.ev.removeAllListeners('creds.update');
+            sock.ev.removeAllListeners('messages.upsert');
+            sock.end(undefined);
+        } catch (e) {}
+        sock = null;
+    }
+}
 
 async function initWhatsApp() {
-    if (sock && (clientReady || initStatus === 'connecting')) {
-        console.log('Baileys: Client is already connecting or active.');
+    if (isInitializing) {
+        console.log('Baileys: Already initializing. Skipping duplicate call.');
+        return;
+    }
+    if (sock && clientReady) {
+        console.log('Baileys: Client is already connected.');
         return;
     }
 
+    isInitializing = true;
     console.log('Baileys: Initializing connection...');
     initStatus = 'connecting';
     initError = '';
-    currentQR = '';
 
     try {
         if (!fs.existsSync(AUTH_DIR)) {
@@ -173,6 +190,8 @@ async function initWhatsApp() {
 
         console.log(`Baileys: Using WA version v${version.join('.')}, isLatest: ${isLatest}`);
 
+        cleanCloseSock();
+
         sock = makeWASocket({
             version,
             logger,
@@ -183,7 +202,12 @@ async function initWhatsApp() {
             },
             browser: ['Umbler Talk', 'Desktop', '1.0.0'],
             generateHighQualityLinkPreview: true,
-            syncFullHistory: false
+            syncFullHistory: false,
+            keepAliveIntervalMs: 15000, // Send ping every 15s to keep WebSocket alive through Cloudflare/Render
+            connectTimeoutMs: 60000,
+            defaultQueryTimeoutMs: 60000,
+            retryRequestDelayMs: 500,
+            maxMsgRetryCount: 5
         });
 
         sock.ev.on('creds.update', saveCreds);
@@ -204,26 +228,27 @@ async function initWhatsApp() {
             }
 
             if (connection === 'close') {
-                const statusCode = (lastDisconnect?.error)?.output?.statusCode;
-                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                console.log(`Baileys: Connection closed. Status: ${statusCode}. Reconnecting: ${shouldReconnect}`);
+                const statusCode = (lastDisconnect?.error)?.output?.statusCode || (lastDisconnect?.error)?.statusCode;
+                const errorMsg = lastDisconnect?.error?.message || String(lastDisconnect?.error || '');
+                const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+                console.log(`Baileys: Connection closed. Status: ${statusCode || 'unknown'} (${errorMsg}). LoggedOut: ${isLoggedOut}`);
 
                 clientReady = false;
-                currentQR = '';
                 connectedUser = null;
+                cleanCloseSock();
 
-                if (statusCode === DisconnectReason.loggedOut) {
+                if (isLoggedOut) {
+                    console.log('Baileys: Session logged out by WhatsApp. Removing auth files.');
                     initStatus = 'disconnected';
                     initError = 'Desconectado do WhatsApp. Escaneie o código QR para reconectar.';
                     try {
                         fs.rmSync(AUTH_DIR, { recursive: true, force: true });
                     } catch (e) {}
-                    sock = null;
                     setTimeout(initWhatsApp, 2000);
                 } else {
+                    console.log(`Baileys: Reconnecting in 3s (Reason: ${statusCode || errorMsg})...`);
                     initStatus = 'connecting';
                     initError = 'Reconectando ao WhatsApp...';
-                    sock = null;
                     setTimeout(initWhatsApp, 3000);
                 }
             } else if (connection === 'open') {
@@ -293,8 +318,10 @@ async function initWhatsApp() {
         console.error('Baileys init error:', err);
         initStatus = 'error';
         initError = err.message || String(err);
-        sock = null;
+        cleanCloseSock();
         setTimeout(initWhatsApp, 5000);
+    } finally {
+        isInitializing = false;
     }
 }
 
@@ -707,12 +734,7 @@ app.post('/api/disconnect', async (req, res) => {
         initStatus = 'disconnected';
         initError = '';
 
-        if (sock) {
-            try {
-                await sock.logout();
-            } catch (e) {}
-            sock = null;
-        }
+        cleanCloseSock();
 
         try {
             fs.rmSync(AUTH_DIR, { recursive: true, force: true });
@@ -727,26 +749,16 @@ app.post('/api/disconnect', async (req, res) => {
 
 app.post('/api/restart', async (req, res) => {
     try {
-        console.log('Baileys: Restart requested.');
+        console.log('Baileys: Reconnection requested by user.');
         clientReady = false;
-        currentQR = '';
         connectedUser = null;
         initStatus = 'connecting';
         initError = '';
 
-        if (sock) {
-            try {
-                sock.end();
-            } catch (e) {}
-            sock = null;
-        }
-
-        try {
-            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-        } catch (e) {}
-
+        cleanCloseSock();
+        // Preserves AUTH_DIR credentials so existing session reconnects without asking for new QR code
         setTimeout(initWhatsApp, 1500);
-        res.json({ success: true, message: 'Reiniciando conexão...' });
+        res.json({ success: true, message: 'Reconectando sessão...' });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -907,10 +919,16 @@ app.get('/api/virtual-numbers/status', async (req, res) => {
     }
 });
 
-const PORT = process.env.PORT || 3000;
-const HOST = '0.0.0.0';
+// Keep-alive timer to prevent Render free instance from sleeping
+function startAntiSleep() {
+    const url = process.env.RENDER_EXTERNAL_URL || 'https://whatsapp-bot-xnae.onrender.com';
+    setInterval(() => {
+        https.get(`${url}/api/status`, () => {}).on('error', () => {});
+    }, 4 * 60 * 1000); // Ping every 4 minutes (well below Render's 15 min limit)
+}
 
 app.listen(PORT, HOST, () => {
     console.log(`Umbler Talk Bot Server running on http://${HOST}:${PORT}`);
     initWhatsApp();
+    startAntiSleep();
 });
