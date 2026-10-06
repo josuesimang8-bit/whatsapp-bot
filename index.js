@@ -55,7 +55,7 @@ function convertToWhatsAppOpus(inputPath) {
         const dir = path.dirname(inputPath);
         const ext = path.extname(inputPath);
         const base = path.basename(inputPath, ext);
-        const outputPath = path.join(dir, `${base}_whatsapp_opus.ogg`);
+        const outputPath = path.join(dir, `${base}_v2_wa_opus.ogg`);
 
         if (fs.existsSync(outputPath)) {
             try {
@@ -70,7 +70,7 @@ function convertToWhatsAppOpus(inputPath) {
             } catch (e) {}
         }
 
-        const cmd = `ffmpeg -y -i "${inputPath}" -vn -c:a libopus -b:a 64k -vbr on -ar 48000 -ac 1 -avoid_negative_ts make_zero "${outputPath}"`;
+        const cmd = `ffmpeg -y -i "${inputPath}" -vn -c:a libopus -b:a 64k -ar 48000 -ac 1 -af asetpts=N/SR/TB -f ogg "${outputPath}"`;
         console.log(`[FFmpeg] Converting audio for WhatsApp Opus PTT: ${inputPath} -> ${outputPath}`);
 
         exec(cmd, (err, stdout, stderr) => {
@@ -758,6 +758,38 @@ app.get('/api/test-audio', async (req, res) => {
             exists: fs.existsSync(result.path),
             size: fs.existsSync(result.path) ? fs.statSync(result.path).size : 0
         });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/send-test-audio', async (req, res) => {
+    try {
+        if (!sock || !clientReady) {
+            return res.status(400).json({ error: 'WhatsApp não está conectado' });
+        }
+        let jid = req.query.jid;
+        if (!jid && connectedUser?.id) {
+            jid = connectedUser.id;
+        }
+        if (!jid) {
+            return res.status(400).json({ error: 'JID de destino não especificado' });
+        }
+        const file = req.query.file || 'uploads/1791251073918.ogg';
+        const fullPath = path.join(__dirname, file);
+        const audioInfo = await convertToWhatsAppOpus(fullPath);
+        const buf = fs.readFileSync(audioInfo.path);
+        const wave = generateWaveform();
+        const mode = req.query.mode || 'ptt'; // 'ptt' or 'audio'
+
+        const sent = await sock.sendMessage(jid, {
+            audio: buf,
+            mimetype: 'audio/ogg; codecs=opus',
+            ptt: mode === 'ptt',
+            seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined,
+            waveform: wave
+        });
+        res.json({ success: true, jid, mode, file: audioInfo.path, duration: audioInfo.seconds, messageId: sent?.key?.id });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
