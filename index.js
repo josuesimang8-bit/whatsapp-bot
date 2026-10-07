@@ -1049,10 +1049,12 @@ const HOST = '0.0.0.0';
 
 // Keep-alive timer to prevent Render free instance from sleeping
 function startAntiSleep() {
-    const url = process.env.RENDER_EXTERNAL_URL || 'https://whatsapp-bot-xnae.onrender.com';
-    setInterval(() => {
-        https.get(`${url}/api/status`, () => {}).on('error', () => {});
-    }, 4 * 60 * 1000); // Ping every 4 minutes (well below Render's 15 min limit)
+    const url = process.env.RENDER_EXTERNAL_URL;
+    if (url) {
+        setInterval(() => {
+            https.get(`${url}/api/status`, () => {}).on('error', () => {});
+        }, 4 * 60 * 1000); // Ping every 4 minutes (well below Render's 15 min limit)
+    }
 }
 
 app.listen(PORT, HOST, () => {
