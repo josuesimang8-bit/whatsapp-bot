@@ -15,6 +15,31 @@ const path = require('path');
 const cors = require('cors');
 const https = require('https');
 const { exec } = require('child_process');
+const crypto = require('crypto');
+
+// Security & Anti-Clone Configuration (PIN 201707)
+const ACCESS_PIN = process.env.ACCESS_PIN || '201707';
+const AUTH_SECRET = process.env.AUTH_SECRET || 'umbler-talk-anti-clone-secret-key-201707';
+const VALID_TOKEN = crypto.createHmac('sha256', AUTH_SECRET).update(ACCESS_PIN).digest('hex');
+
+// Anti-brute force store: { ip: { count, lockedUntil } }
+const loginAttempts = new Map();
+const MAX_ATTEMPTS = 5;
+const LOCKOUT_TIME_MS = 15 * 60 * 1000; // 15 minutos
+
+function getClientIp(req) {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (forwarded) return forwarded.split(',')[0].trim();
+    return req.socket?.remoteAddress || req.ip || 'unknown';
+}
+
+function checkAuth(req, res, next) {
+    const token = req.headers['x-access-token'] || req.query.token;
+    if (token === VALID_TOKEN) {
+        return next();
+    }
+    return res.status(401).json({ error: 'Acesso negado: Autenticação necessária.' });
+}
 
 const app = express();
 app.use(cors());
@@ -774,7 +799,50 @@ async function sendStepPayload(jid, step) {
 }
 
 // API Routes
+app.post('/api/verify-pin', (req, res) => {
+    const ip = getClientIp(req);
+    const now = Date.now();
+    const record = loginAttempts.get(ip) || { count: 0, lockedUntil: 0 };
+
+    if (record.lockedUntil && now < record.lockedUntil) {
+        const remainingMin = Math.ceil((record.lockedUntil - now) / 60000);
+        return res.status(429).json({ 
+            error: `Muitas tentativas incorretas. Acesso bloqueado por segurança por mais ${remainingMin} minuto(s).` 
+        });
+    }
+
+    const { pin } = req.body || {};
+    if (pin && String(pin).trim() === ACCESS_PIN) {
+        loginAttempts.delete(ip);
+        return res.json({ success: true, token: VALID_TOKEN });
+    }
+
+    record.count = (record.count || 0) + 1;
+    if (record.count >= MAX_ATTEMPTS) {
+        record.lockedUntil = now + LOCKOUT_TIME_MS;
+        loginAttempts.set(ip, record);
+        return res.status(429).json({ 
+            error: 'Número máximo de tentativas excedido. Bloqueado por 15 minutos.' 
+        });
+    }
+
+    loginAttempts.set(ip, record);
+    const remaining = MAX_ATTEMPTS - record.count;
+    return res.status(401).json({ 
+        error: `PIN incorreto. Você tem mais ${remaining} tentativa(s) antes do bloqueio temporário.` 
+    });
+});
+
 app.get('/api/status', (req, res) => {
+    const token = req.headers['x-access-token'] || req.query.token;
+    if (token !== VALID_TOKEN) {
+        return res.json({
+            locked: true,
+            ready: false,
+            status: 'locked'
+        });
+    }
+
     res.json({
         ready: clientReady,
         qr: currentQR,
@@ -784,7 +852,7 @@ app.get('/api/status', (req, res) => {
     });
 });
 
-app.get('/api/test-audio', async (req, res) => {
+app.get('/api/test-audio', checkAuth, async (req, res) => {
     const file = req.query.file || 'uploads/1791248087020.ogg';
     const fullPath = path.join(__dirname, file);
     try {
@@ -801,7 +869,7 @@ app.get('/api/test-audio', async (req, res) => {
     }
 });
 
-app.get('/api/send-test-audio', async (req, res) => {
+app.get('/api/send-test-audio', checkAuth, async (req, res) => {
     try {
         if (!sock || !clientReady) {
             return res.status(400).json({ error: 'WhatsApp não está conectado' });
@@ -850,7 +918,7 @@ app.get('/api/send-test-audio', async (req, res) => {
     }
 });
 
-app.post('/api/disconnect', async (req, res) => {
+app.post('/api/disconnect', checkAuth, async (req, res) => {
     try {
         console.log('Baileys: User requested disconnection.');
         clientReady = false;
@@ -872,7 +940,7 @@ app.post('/api/disconnect', async (req, res) => {
     }
 });
 
-app.post('/api/restart', async (req, res) => {
+app.post('/api/restart', checkAuth, async (req, res) => {
     try {
         console.log('Baileys: Reconnection requested by user.');
         clientReady = false;
@@ -889,11 +957,11 @@ app.post('/api/restart', async (req, res) => {
     }
 });
 
-app.get('/api/data', (req, res) => {
+app.get('/api/data', checkAuth, (req, res) => {
     res.json(botData);
 });
 
-app.post('/api/save-steps', (req, res) => {
+app.post('/api/save-steps', checkAuth, (req, res) => {
     const { steps } = req.body;
     if (Array.isArray(steps)) {
         botData.steps = steps;
@@ -904,7 +972,7 @@ app.post('/api/save-steps', (req, res) => {
     }
 });
 
-app.post('/api/upload', upload.single('file'), async (req, res) => {
+app.post('/api/upload', checkAuth, upload.single('file'), async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No file uploaded' });
     }
@@ -925,12 +993,12 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 });
 
 // Live Chat API
-app.get('/api/chats', (req, res) => {
+app.get('/api/chats', checkAuth, (req, res) => {
     const chatList = Object.values(liveChats).sort((a, b) => b.timestamp - a.timestamp);
     res.json({ success: true, chats: chatList });
 });
 
-app.get('/api/messages/:jid', (req, res) => {
+app.get('/api/messages/:jid', checkAuth, (req, res) => {
     const jid = req.params.jid;
     const chat = liveChats[jid];
     if (chat) {
@@ -942,7 +1010,7 @@ app.get('/api/messages/:jid', (req, res) => {
     }
 });
 
-app.post('/api/reset-user/:jid', (req, res) => {
+app.post('/api/reset-user/:jid', checkAuth, (req, res) => {
     const jid = req.params.jid;
     if (userStates[jid]?.waitTimeoutId) {
         clearTimeout(userStates[jid].waitTimeoutId);
@@ -956,7 +1024,7 @@ app.post('/api/reset-user/:jid', (req, res) => {
     res.json({ success: true, message: 'Fluxo reiniciado com sucesso para este contato.' });
 });
 
-app.post('/api/send', async (req, res) => {
+app.post('/api/send', checkAuth, async (req, res) => {
     const { jid, message } = req.body;
     if (!jid || !message) {
         return res.status(400).json({ error: 'jid and message required' });
@@ -986,7 +1054,7 @@ app.post('/api/send', async (req, res) => {
     }
 });
 
-app.post('/api/bot-toggle/:jid', (req, res) => {
+app.post('/api/bot-toggle/:jid', checkAuth, (req, res) => {
     const jid = req.params.jid;
     if (!liveChats[jid]) {
         return res.status(404).json({ error: 'Chat not found' });
@@ -1025,7 +1093,7 @@ function smsApiRequest(url) {
     });
 }
 
-app.get('/api/virtual-numbers/status', async (req, res) => {
+app.get('/api/virtual-numbers/status', checkAuth, async (req, res) => {
     const apiKey = getSmsActivateKey();
     if (!apiKey || apiKey === 'YOUR_API_KEY_HERE') {
         return res.json({ success: false, hasKey: false, error: 'Chave API não configurada.' });
@@ -1052,7 +1120,7 @@ function startAntiSleep() {
     const url = process.env.RENDER_EXTERNAL_URL;
     if (url) {
         setInterval(() => {
-            https.get(`${url}/api/status`, () => {}).on('error', () => {});
+            https.get(`${url}/api/status?token=${VALID_TOKEN}`, () => {}).on('error', () => {});
         }, 4 * 60 * 1000); // Ping every 4 minutes (well below Render's 15 min limit)
     }
 }
