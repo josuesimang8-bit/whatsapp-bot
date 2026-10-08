@@ -229,6 +229,7 @@ let initStatus = 'disconnected'; // 'disconnected' | 'connecting' | 'waiting_qr'
 let initError = '';
 let connectedUser = null; // { phone, name }
 let readyTimestamp = Math.floor(Date.now() / 1000);
+let consecutiveDisconnects = 0;
 
 const AUTH_DIR = path.join(__dirname, 'auth_info_baileys');
 const logger = pino({ level: 'silent' });
@@ -299,6 +300,7 @@ async function initWhatsApp() {
             if (qr) {
                 console.log('Baileys: New QR Code received.');
                 initStatus = 'waiting_qr';
+                consecutiveDisconnects = 0;
                 qrcode.toDataURL(qr, (err, url) => {
                     if (!err) {
                         currentQR = url;
@@ -309,23 +311,31 @@ async function initWhatsApp() {
             }
 
             if (connection === 'close') {
+                consecutiveDisconnects++;
                 const statusCode = (lastDisconnect?.error)?.output?.statusCode || (lastDisconnect?.error)?.statusCode;
                 const errorMsg = lastDisconnect?.error?.message || String(lastDisconnect?.error || '');
                 const isLoggedOut = statusCode === DisconnectReason.loggedOut;
-                console.log(`Baileys: Connection closed. Status: ${statusCode || 'unknown'} (${errorMsg}). LoggedOut: ${isLoggedOut}`);
+                console.log(`Baileys: Connection closed. Status: ${statusCode || 'unknown'} (${errorMsg}). LoggedOut: ${isLoggedOut}. Disconnects: ${consecutiveDisconnects}`);
 
                 clientReady = false;
                 connectedUser = null;
                 cleanCloseSock();
 
-                if (isLoggedOut) {
-                    console.log('Baileys: Session logged out by WhatsApp. Removing auth files.');
-                    initStatus = 'disconnected';
-                    initError = 'Desconectado do WhatsApp. Escaneie o código QR para reconectar.';
+                const shouldClearAuth = isLoggedOut || 
+                    statusCode === 401 || 
+                    statusCode === 403 || 
+                    (consecutiveDisconnects >= 2 && !connectedUser);
+
+                if (shouldClearAuth) {
+                    console.log('Baileys: Session invalid or disconnected. Removing auth files to generate fresh QR code.');
+                    initStatus = 'waiting_qr';
+                    initError = 'Escaneie o código QR para conectar.';
+                    consecutiveDisconnects = 0;
+                    currentQR = '';
                     try {
                         fs.rmSync(AUTH_DIR, { recursive: true, force: true });
                     } catch (e) {}
-                    setTimeout(initWhatsApp, 2000);
+                    setTimeout(initWhatsApp, 1500);
                 } else {
                     console.log(`Baileys: Reconnecting in 3s (Reason: ${statusCode || errorMsg})...`);
                     initStatus = 'connecting';
@@ -335,6 +345,7 @@ async function initWhatsApp() {
             } else if (connection === 'open') {
                 console.log('Baileys: Connected successfully!');
                 clientReady = true;
+                consecutiveDisconnects = 0;
                 initStatus = 'ready';
                 currentQR = '';
                 initError = '';
@@ -942,16 +953,23 @@ app.post('/api/disconnect', checkAuth, async (req, res) => {
 
 app.post('/api/restart', checkAuth, async (req, res) => {
     try {
-        console.log('Baileys: Reconnection requested by user.');
+        console.log('Baileys: Reconnection / QR code refresh requested.');
         clientReady = false;
         connectedUser = null;
+        currentQR = '';
         initStatus = 'connecting';
         initError = '';
+        consecutiveDisconnects = 0;
 
         cleanCloseSock();
-        // Preserves AUTH_DIR credentials so existing session reconnects without asking for new QR code
-        setTimeout(initWhatsApp, 1500);
-        res.json({ success: true, message: 'Reconectando sessão...' });
+        // If clean requested or if bot was not connected, wipe auth files to guarantee fresh QR
+        if (req.query.clean === 'true' || req.body?.clean === true || !clientReady) {
+            try {
+                fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+            } catch (e) {}
+        }
+        setTimeout(initWhatsApp, 1000);
+        res.json({ success: true, message: 'Gerando novo código QR...' });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }

@@ -997,6 +997,11 @@
         .shake {
             animation: shake 0.35s ease-in-out;
         }
+
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
@@ -1088,13 +1093,17 @@
                         <h2 style="font-size: 20px; font-weight: 800; margin-bottom: 6px;">Conectar WhatsApp</h2>
                         <p style="color: var(--text-muted); font-size: 13px;">Conexão instantânea via Baileys multi-aparelhos</p>
                         
-                        <div class="qr-frame">
-                            <img id="qrImg" src="" alt="A carregar código QR...">
+                        <div class="qr-frame" id="qrFrame" style="min-width: 280px; min-height: 280px; display: inline-flex; align-items: center; justify-content: center;">
+                            <div id="qrLoading" style="display: none; padding: 40px 20px; text-align: center;">
+                                <div style="font-size: 32px; animation: spin 1.2s linear infinite; display: inline-block;">🔄</div>
+                                <div style="margin-top: 12px; font-weight: 600; color: var(--text-muted); font-size: 13px;" id="qrLoadingText">A gerar código QR...</div>
+                            </div>
+                            <img id="qrImg" src="" alt="Código QR WhatsApp" style="display: none; width: 250px; height: 250px;">
                         </div>
 
-                        <div style="margin-bottom: 15px;">
-                            <button class="btn btn-outline" style="font-size: 12px;" onclick="restartWhatsApp()">
-                                🔄 Atualizar Código QR
+                        <div style="margin-bottom: 15px; display: flex; gap: 8px; justify-content: center;">
+                            <button class="btn btn-primary" style="font-size: 13px; font-weight: 700;" onclick="refreshNewQR()">
+                                🔄 Gerar Novo QR Code
                             </button>
                         </div>
 
@@ -1387,6 +1396,8 @@
             }
         }
 
+        let hasAutoNavigated = false;
+
         // Poll WhatsApp Connection Status
         async function checkStatus() {
             try {
@@ -1413,6 +1424,12 @@
                     return;
                 }
 
+                // If disconnected and haven't auto-navigated yet, guide user directly to connection screen
+                if (!data.ready && !hasAutoNavigated) {
+                    hasAutoNavigated = true;
+                    switchNav('connect');
+                }
+
                 if (data.ready) {
                     sideDot.className = 'status-dot online';
                     sideText.innerText = 'Conectado';
@@ -1427,15 +1444,31 @@
                     if (connectedBox) connectedBox.style.display = 'none';
                     if (qrBox) qrBox.style.display = 'block';
 
+                    const qrLoading = document.getElementById('qrLoading');
+                    const qrLoadingText = document.getElementById('qrLoadingText');
+
                     if (data.status === 'waiting_qr' && data.qr) {
                         sideDot.className = 'status-dot waiting';
                         sideText.innerText = 'Aguardando QR';
-                        if (qrImg && qrImg.src !== data.qr) {
-                            qrImg.src = data.qr;
+                        if (qrLoading) qrLoading.style.display = 'none';
+                        if (qrImg) {
+                            qrImg.style.display = 'block';
+                            if (qrImg.src !== data.qr) {
+                                qrImg.src = data.qr;
+                            }
                         }
                     } else {
                         sideDot.className = 'status-dot';
-                        sideText.innerText = data.status === 'connecting' ? 'Conectando...' : 'Desconectado';
+                        sideText.innerText = data.status === 'connecting' ? 'Gerando QR...' : 'Desconectado';
+                        if (qrImg) qrImg.style.display = 'none';
+                        if (qrLoading) {
+                            qrLoading.style.display = 'block';
+                            if (qrLoadingText) {
+                                qrLoadingText.innerText = data.status === 'connecting' 
+                                    ? 'A estabelecer conexão e gerando QR Code...' 
+                                    : 'Desconectado. Clique abaixo para gerar novo QR Code.';
+                            }
+                        }
                     }
                 }
             } catch (e) {
@@ -1444,14 +1477,26 @@
             setTimeout(checkStatus, 3000);
         }
 
-        async function restartWhatsApp() {
-            showToast('A reiniciar conexão do WhatsApp...');
+        async function refreshNewQR() {
+            showToast('A gerar novo código QR limpo...');
+            const qrLoading = document.getElementById('qrLoading');
+            const qrLoadingText = document.getElementById('qrLoadingText');
+            const qrImg = document.getElementById('qrImg');
+            if (qrImg) qrImg.style.display = 'none';
+            if (qrLoading) {
+                qrLoading.style.display = 'block';
+                if (qrLoadingText) qrLoadingText.innerText = 'Limpando sessão e solicitando novo QR Code ao WhatsApp...';
+            }
             try {
-                await fetch('/api/restart', { method: 'POST' });
+                await fetch('/api/restart?clean=true', { method: 'POST' });
                 setTimeout(checkStatus, 1500);
             } catch (e) {
-                showToast('Erro ao reiniciar conexão.');
+                showToast('Erro ao gerar novo QR code.');
             }
+        }
+
+        async function restartWhatsApp() {
+            refreshNewQR();
         }
 
         async function disconnectWhatsApp() {
