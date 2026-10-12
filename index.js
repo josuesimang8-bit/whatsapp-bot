@@ -221,60 +221,95 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-// WhatsApp Connection State (Baileys)
-let sock = null;
-let currentQR = '';
-let clientReady = false;
-let initStatus = 'disconnected'; // 'disconnected' | 'connecting' | 'waiting_qr' | 'ready'
-let initError = '';
-let connectedUser = null; // { phone, name }
-let readyTimestamp = Math.floor(Date.now() / 1000);
-let consecutiveDisconnects = 0;
-
-const AUTH_DIR = path.join(__dirname, 'auth_info_baileys');
+// WhatsApp Multi-Instance State Manager (Linha 1 & Linha 2)
 const logger = pino({ level: 'silent' });
-let isInitializing = false;
 
-function cleanCloseSock() {
-    if (sock) {
-        try {
-            sock.ev.removeAllListeners('connection.update');
-            sock.ev.removeAllListeners('creds.update');
-            sock.ev.removeAllListeners('messages.upsert');
-            sock.end(undefined);
-        } catch (e) {}
-        sock = null;
+const instances = {
+    '1': {
+        id: '1',
+        name: 'Linha 1',
+        authDir: path.join(__dirname, 'auth_info_baileys_1'),
+        sock: null,
+        currentQR: '',
+        clientReady: false,
+        initStatus: 'disconnected',
+        initError: '',
+        connectedUser: null,
+        readyTimestamp: Math.floor(Date.now() / 1000),
+        isInitializing: false,
+        consecutiveDisconnects: 0
+    },
+    '2': {
+        id: '2',
+        name: 'Linha 2',
+        authDir: path.join(__dirname, 'auth_info_baileys_2'),
+        sock: null,
+        currentQR: '',
+        clientReady: false,
+        initStatus: 'disconnected',
+        initError: '',
+        connectedUser: null,
+        readyTimestamp: Math.floor(Date.now() / 1000),
+        isInitializing: false,
+        consecutiveDisconnects: 0
+    }
+};
+
+// Auto-migrate legacy auth_info_baileys to Linha 1 if present
+const LEGACY_AUTH_DIR = path.join(__dirname, 'auth_info_baileys');
+if (fs.existsSync(LEGACY_AUTH_DIR) && !fs.existsSync(instances['1'].authDir)) {
+    try {
+        fs.cpSync(LEGACY_AUTH_DIR, instances['1'].authDir, { recursive: true });
+        console.log('Migrated legacy auth_info_baileys to Linha 1 auth directory.');
+    } catch (e) {
+        console.error('Migration failed:', e);
     }
 }
 
-async function initWhatsApp() {
-    if (isInitializing) {
-        console.log('Baileys: Already initializing. Skipping duplicate call.');
+function cleanCloseSock(instId) {
+    const inst = instances[instId];
+    if (inst && inst.sock) {
+        try {
+            inst.sock.ev.removeAllListeners('connection.update');
+            inst.sock.ev.removeAllListeners('creds.update');
+            inst.sock.ev.removeAllListeners('messages.upsert');
+            inst.sock.end(undefined);
+        } catch (e) {}
+        inst.sock = null;
+    }
+}
+
+async function initWhatsApp(instId = '1') {
+    const inst = instances[instId];
+    if (!inst) return;
+
+    if (inst.isInitializing) {
+        console.log(`Baileys [Linha ${instId}]: Already initializing. Skipping duplicate call.`);
         return;
     }
-    if (sock && clientReady) {
-        console.log('Baileys: Client is already connected.');
+    if (inst.sock && inst.clientReady) {
+        console.log(`Baileys [Linha ${instId}]: Client is already connected.`);
         return;
     }
 
-    isInitializing = true;
-    console.log('Baileys: Initializing connection...');
-    initStatus = 'connecting';
-    initError = '';
+    inst.isInitializing = true;
+    console.log(`Baileys [Linha ${instId}]: Initializing connection...`);
+    inst.initStatus = 'connecting';
+    inst.initError = '';
 
     try {
-        if (!fs.existsSync(AUTH_DIR)) {
-            fs.mkdirSync(AUTH_DIR, { recursive: true });
+        if (!fs.existsSync(inst.authDir)) {
+            fs.mkdirSync(inst.authDir, { recursive: true });
         }
 
-        const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+        const { state, saveCreds } = await useMultiFileAuthState(inst.authDir);
         const { version, isLatest } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307], isLatest: true }));
 
-        console.log(`Baileys: Using WA version v${version.join('.')}, isLatest: ${isLatest}`);
+        console.log(`Baileys [Linha ${instId}]: Using WA version v${version.join('.')}, isLatest: ${isLatest}`);
 
-        cleanCloseSock();
+        cleanCloseSock(instId);
 
-        sock = makeWASocket({
+        inst.sock = makeWASocket({
             version,
             logger,
             printQRInTerminal: false,
@@ -282,105 +317,100 @@ async function initWhatsApp() {
                 creds: state.creds,
                 keys: makeCacheableSignalKeyStore(state.keys, logger)
             },
-            browser: ['Umbler Talk', 'Desktop', '1.0.0'],
+            browser: [`Umbler Talk L${instId}`, 'Desktop', '1.0.0'],
             generateHighQualityLinkPreview: true,
             syncFullHistory: false,
-            keepAliveIntervalMs: 15000, // Send ping every 15s to keep WebSocket alive through Cloudflare/Render
+            keepAliveIntervalMs: 15000,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             retryRequestDelayMs: 500,
             maxMsgRetryCount: 5
         });
 
-        sock.ev.on('creds.update', saveCreds);
+        inst.sock.ev.on('creds.update', saveCreds);
 
-        sock.ev.on('connection.update', async (update) => {
+        inst.sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
             if (qr) {
-                console.log('Baileys: New QR Code received.');
-                initStatus = 'waiting_qr';
-                consecutiveDisconnects = 0;
+                console.log(`Baileys [Linha ${instId}]: New QR Code received.`);
+                inst.initStatus = 'waiting_qr';
+                inst.consecutiveDisconnects = 0;
                 qrcode.toDataURL(qr, (err, url) => {
                     if (!err) {
-                        currentQR = url;
+                        inst.currentQR = url;
                     } else {
-                        console.error('Error generating QR URL:', err);
+                        console.error(`Error generating QR URL for Linha ${instId}:`, err);
                     }
                 });
             }
 
             if (connection === 'close') {
-                consecutiveDisconnects++;
+                inst.consecutiveDisconnects++;
                 const statusCode = (lastDisconnect?.error)?.output?.statusCode || (lastDisconnect?.error)?.statusCode;
                 const errorMsg = lastDisconnect?.error?.message || String(lastDisconnect?.error || '');
                 const isLoggedOut = statusCode === DisconnectReason.loggedOut;
-                console.log(`Baileys: Connection closed. Status: ${statusCode || 'unknown'} (${errorMsg}). LoggedOut: ${isLoggedOut}. Disconnects: ${consecutiveDisconnects}`);
+                console.log(`Baileys [Linha ${instId}]: Connection closed. Status: ${statusCode || 'unknown'} (${errorMsg}). LoggedOut: ${isLoggedOut}. Disconnects: ${inst.consecutiveDisconnects}`);
 
-                clientReady = false;
-                connectedUser = null;
-                cleanCloseSock();
+                inst.clientReady = false;
+                inst.connectedUser = null;
+                cleanCloseSock(instId);
 
                 const shouldClearAuth = isLoggedOut || 
                     statusCode === 401 || 
                     statusCode === 403 || 
-                    (consecutiveDisconnects >= 2 && !connectedUser);
+                    (inst.consecutiveDisconnects >= 2 && !inst.connectedUser);
 
                 if (shouldClearAuth) {
-                    console.log('Baileys: Session invalid or disconnected. Removing auth files to generate fresh QR code.');
-                    initStatus = 'waiting_qr';
-                    initError = 'Escaneie o código QR para conectar.';
-                    consecutiveDisconnects = 0;
-                    currentQR = '';
+                    console.log(`Baileys [Linha ${instId}]: Session invalid or disconnected. Removing auth files to generate fresh QR code.`);
+                    inst.initStatus = 'waiting_qr';
+                    inst.initError = 'Escaneie o código QR para conectar.';
+                    inst.consecutiveDisconnects = 0;
+                    inst.currentQR = '';
                     try {
-                        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+                        fs.rmSync(inst.authDir, { recursive: true, force: true });
                     } catch (e) {}
-                    setTimeout(initWhatsApp, 1500);
+                    setTimeout(() => initWhatsApp(instId), 1500);
                 } else {
-                    console.log(`Baileys: Reconnecting in 3s (Reason: ${statusCode || errorMsg})...`);
-                    initStatus = 'connecting';
-                    initError = 'Reconectando ao WhatsApp...';
-                    setTimeout(initWhatsApp, 3000);
+                    console.log(`Baileys [Linha ${instId}]: Reconnecting in 3s (Reason: ${statusCode || errorMsg})...`);
+                    inst.initStatus = 'connecting';
+                    inst.initError = 'Reconectando ao WhatsApp...';
+                    setTimeout(() => initWhatsApp(instId), 3000);
                 }
             } else if (connection === 'open') {
-                console.log('Baileys: Connected successfully!');
-                clientReady = true;
-                consecutiveDisconnects = 0;
-                initStatus = 'ready';
-                currentQR = '';
-                initError = '';
-                readyTimestamp = Math.floor(Date.now() / 1000);
+                console.log(`Baileys [Linha ${instId}]: Connected successfully!`);
+                inst.clientReady = true;
+                inst.consecutiveDisconnects = 0;
+                inst.initStatus = 'ready';
+                inst.currentQR = '';
+                inst.initError = '';
+                inst.readyTimestamp = Math.floor(Date.now() / 1000);
 
-                const rawId = sock.user?.id || '';
+                const rawId = inst.sock.user?.id || '';
                 const phone = rawId.split(':')[0] || rawId.split('@')[0];
-                connectedUser = {
+                inst.connectedUser = {
                     id: rawId,
                     phone: '+' + phone,
-                    name: sock.user?.name || phone
+                    name: inst.sock.user?.name || phone
                 };
             }
         });
 
         // Messages handling
-        sock.ev.on('messages.upsert', async (m) => {
+        inst.sock.ev.on('messages.upsert', async (m) => {
             if (m.type !== 'notify') return;
 
             for (const msg of m.messages) {
-                // Ignore outgoing messages sent by the bot
                 if (msg.key.fromMe) continue;
 
                 const jid = msg.key.remoteJid;
-                // Ignore group chats and status/broadcasts
                 if (!jid || jid.endsWith('@g.us') || jid.includes('status@broadcast')) continue;
 
-                // Ignore catch-up messages from before the bot connected
                 const msgTimestamp = Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000);
-                if (msgTimestamp < readyTimestamp) {
-                    console.log(`Ignoring old message from ${jid}`);
+                if (msgTimestamp < inst.readyTimestamp) {
                     continue;
                 }
 
-                // Extract message body text or media type
                 const text = msg.message?.conversation ||
                              msg.message?.extendedTextMessage?.text ||
                              msg.message?.imageMessage?.caption ||
@@ -394,49 +424,50 @@ async function initWhatsApp() {
                     msg.message?.stickerMessage ? '[Figurinha]' : '[Mensagem]'
                 );
 
-                console.log(`[Baileys Incoming] ${jid}: "${text || incomingContent}"`);
+                console.log(`[Baileys Linha ${instId}] ${jid}: "${text || incomingContent}"`);
 
-                // Save to live chat history
-                recordIncomingMessage(jid, text || incomingContent, msg);
+                recordIncomingMessage(instId, jid, text || incomingContent, msg);
 
-                // Handle automated flow execution
-                if (clientReady) {
-                    await handleFlowForUser(jid, text || incomingContent);
+                if (inst.clientReady) {
+                    await handleFlowForUser(instId, jid, text || incomingContent);
                 }
             }
         });
 
     } catch (err) {
-        console.error('Baileys init error:', err);
-        initStatus = 'error';
-        initError = err.message || String(err);
-        cleanCloseSock();
-        setTimeout(initWhatsApp, 5000);
+        console.error(`Baileys [Linha ${instId}] init error:`, err);
+        inst.initStatus = 'error';
+        inst.initError = err.message || String(err);
+        cleanCloseSock(instId);
+        setTimeout(() => initWhatsApp(instId), 5000);
     } finally {
-        isInitializing = false;
+        inst.isInitializing = false;
     }
 }
 
 // User Flow Execution State & Disk Persistence
 const STATES_FILE = path.join(__dirname, 'user_states.json');
-let userStates = {}; // { jid: { currentStepIndex, status: 'running'|'waiting_reply'|'sending_question'|'completed'|'paused', lastActive, answers: {}, pendingReply: null, waitTimeoutId: null } }
-const userLocks = new Set(); // Prevent concurrent step execution for same jid
+let userStates = {}; // { 'instId:jid': { instanceId, jid, currentStepIndex, status, lastActive, answers, pendingReply, waitTimeoutId } }
+const userLocks = new Set(); // Prevent concurrent step execution for same user & line
 
 function loadUserStates() {
     if (fs.existsSync(STATES_FILE)) {
         try {
             const raw = JSON.parse(fs.readFileSync(STATES_FILE, 'utf-8'));
-            for (const jid in raw) {
-                userStates[jid] = {
-                    currentStepIndex: typeof raw[jid].currentStepIndex === 'number' ? raw[jid].currentStepIndex : 0,
-                    status: raw[jid].status || 'running',
-                    lastActive: raw[jid].lastActive || Date.now(),
-                    answers: raw[jid].answers || {},
+            for (const key in raw) {
+                const parts = key.includes(':') ? key.split(':') : ['1', key];
+                userStates[key] = {
+                    instanceId: raw[key].instanceId || parts[0],
+                    jid: raw[key].jid || parts[1],
+                    currentStepIndex: typeof raw[key].currentStepIndex === 'number' ? raw[key].currentStepIndex : 0,
+                    status: raw[key].status || 'running',
+                    lastActive: raw[key].lastActive || Date.now(),
+                    answers: raw[key].answers || {},
                     pendingReply: null,
                     waitTimeoutId: null
                 };
             }
-            console.log(`[Baileys Flow] Carregados ${Object.keys(userStates).length} estados de utilizadores de user_states.json.`);
+            console.log(`[Baileys Flow] Carregados ${Object.keys(userStates).length} estados de utilizadores.`);
         } catch (e) {
             console.error('Error loading user_states.json:', e);
             userStates = {};
@@ -447,12 +478,14 @@ function loadUserStates() {
 function saveUserStates() {
     try {
         const clean = {};
-        for (const jid in userStates) {
-            clean[jid] = {
-                currentStepIndex: userStates[jid].currentStepIndex,
-                status: userStates[jid].status,
-                lastActive: userStates[jid].lastActive,
-                answers: userStates[jid].answers || {}
+        for (const key in userStates) {
+            clean[key] = {
+                instanceId: userStates[key].instanceId,
+                jid: userStates[key].jid,
+                currentStepIndex: userStates[key].currentStepIndex,
+                status: userStates[key].status,
+                lastActive: userStates[key].lastActive,
+                answers: userStates[key].answers || {}
             };
         }
         fs.writeFileSync(STATES_FILE, JSON.stringify(clean, null, 2));
@@ -463,13 +496,18 @@ function saveUserStates() {
 
 loadUserStates();
 
-function recordIncomingMessage(jid, text, msg) {
+function recordIncomingMessage(instId, jid, text, msg) {
     const rawNumber = jid.split('@')[0];
     const pushName = msg.pushName || rawNumber;
+    const chatKey = `${instId}:${jid}`;
+    const instName = instId === '1' ? 'Linha 1' : 'Linha 2';
 
-    if (!liveChats[jid]) {
-        liveChats[jid] = {
-            id: jid,
+    if (!liveChats[chatKey]) {
+        liveChats[chatKey] = {
+            id: chatKey,
+            jid: jid,
+            instanceId: instId,
+            instanceName: instName,
             name: pushName,
             phone: '+' + rawNumber,
             lastMessage: text || 'Mídia recebida',
@@ -479,31 +517,39 @@ function recordIncomingMessage(jid, text, msg) {
             messages: []
         };
     } else {
-        liveChats[jid].lastMessage = text || 'Mídia recebida';
-        liveChats[jid].timestamp = Date.now();
-        liveChats[jid].unread = (liveChats[jid].unread || 0) + 1;
-        if (pushName && pushName !== rawNumber) liveChats[jid].name = pushName;
+        liveChats[chatKey].lastMessage = text || 'Mídia recebida';
+        liveChats[chatKey].timestamp = Date.now();
+        liveChats[chatKey].unread = (liveChats[chatKey].unread || 0) + 1;
+        liveChats[chatKey].instanceId = instId;
+        liveChats[chatKey].instanceName = instName;
+        if (pushName && pushName !== rawNumber) liveChats[chatKey].name = pushName;
     }
 
-    liveChats[jid].messages.push({
+    liveChats[chatKey].messages.push({
         id: msg.key.id || String(Date.now()),
         fromMe: false,
         text: text || '',
         timestamp: Date.now()
     });
 
-    if (liveChats[jid].messages.length > 50) {
-        liveChats[jid].messages.shift();
+    if (liveChats[chatKey].messages.length > 50) {
+        liveChats[chatKey].messages.shift();
     }
 
     saveChats();
 }
 
-function recordOutgoingMessage(jid, text, mediaPath) {
+function recordOutgoingMessage(instId, jid, text, mediaPath) {
     const rawNumber = jid.split('@')[0];
-    if (!liveChats[jid]) {
-        liveChats[jid] = {
-            id: jid,
+    const chatKey = `${instId}:${jid}`;
+    const instName = instId === '1' ? 'Linha 1' : 'Linha 2';
+
+    if (!liveChats[chatKey]) {
+        liveChats[chatKey] = {
+            id: chatKey,
+            jid: jid,
+            instanceId: instId,
+            instanceName: instName,
             name: rawNumber,
             phone: '+' + rawNumber,
             lastMessage: text || (mediaPath ? 'Mídia enviada' : ''),
@@ -513,11 +559,13 @@ function recordOutgoingMessage(jid, text, mediaPath) {
             messages: []
         };
     } else {
-        liveChats[jid].lastMessage = text || (mediaPath ? 'Mídia enviada' : '');
-        liveChats[jid].timestamp = Date.now();
+        liveChats[chatKey].lastMessage = text || (mediaPath ? 'Mídia enviada' : '');
+        liveChats[chatKey].timestamp = Date.now();
+        liveChats[chatKey].instanceId = instId;
+        liveChats[chatKey].instanceName = instName;
     }
 
-    liveChats[jid].messages.push({
+    liveChats[chatKey].messages.push({
         id: String(Date.now()),
         fromMe: true,
         text: text || '',
@@ -525,30 +573,32 @@ function recordOutgoingMessage(jid, text, mediaPath) {
         timestamp: Date.now()
     });
 
-    if (liveChats[jid].messages.length > 50) {
-        liveChats[jid].messages.shift();
+    if (liveChats[chatKey].messages.length > 50) {
+        liveChats[chatKey].messages.shift();
     }
 
     saveChats();
 }
 
-async function handleFlowForUser(jid, incomingText) {
+async function handleFlowForUser(instId, jid, incomingText) {
     const rawText = (incomingText || '').trim();
+    const chatKey = `${instId}:${jid}`;
+    const inst = instances[instId] || instances['1'];
 
     // Check for user manual reset command
     if (rawText.toLowerCase() === '#reset' || rawText.toLowerCase() === '#reiniciar') {
-        console.log(`[Baileys Flow] User ${jid} sent reset command: ${rawText}`);
-        if (userStates[jid]?.waitTimeoutId) {
-            clearTimeout(userStates[jid].waitTimeoutId);
+        console.log(`[Baileys Flow L${instId}] User ${jid} sent reset command: ${rawText}`);
+        if (userStates[chatKey]?.waitTimeoutId) {
+            clearTimeout(userStates[chatKey].waitTimeoutId);
         }
-        delete userStates[jid];
+        delete userStates[chatKey];
         saveUserStates();
-        if (liveChats[jid]) {
-            liveChats[jid].botStatus = 'active';
+        if (liveChats[chatKey]) {
+            liveChats[chatKey].botStatus = 'active';
             saveChats();
         }
-        if (sock && clientReady) {
-            await sock.sendMessage(jid, {
+        if (inst.sock && inst.clientReady) {
+            await inst.sock.sendMessage(jid, {
                 text: '🔄 O seu fluxo foi reiniciado com sucesso!\nEnvie qualquer mensagem para começar novamente.'
             });
         }
@@ -556,16 +606,16 @@ async function handleFlowForUser(jid, incomingText) {
     }
 
     // Check if user is manually paused by an operator in Live Chat
-    if (liveChats[jid] && liveChats[jid].botStatus === 'paused') {
-        console.log(`[Baileys Flow] Bot is paused for ${jid}. Operator active. Automated reply ignored.`);
+    if (liveChats[chatKey] && liveChats[chatKey].botStatus === 'paused') {
+        console.log(`[Baileys Flow L${instId}] Bot is paused for ${jid}. Operator active. Automated reply ignored.`);
         return;
     }
 
-    const state = userStates[jid];
+    const state = userStates[chatKey];
 
     // If flow is already completed for this user, do not loop
     if (state && state.status === 'completed') {
-        console.log(`[Baileys Flow] User ${jid} already completed the flow. Ignoring automated loop.`);
+        console.log(`[Baileys Flow L${instId}] User ${jid} already completed the flow. Ignoring automated loop.`);
         return;
     }
 
@@ -576,7 +626,7 @@ async function handleFlowForUser(jid, incomingText) {
 
     // If the question is currently transmitting, buffer this reply
     if (state && state.status === 'sending_question') {
-        console.log(`[Baileys Flow] User ${jid} replied while question was transmitting. Buffering reply: "${rawText}"`);
+        console.log(`[Baileys Flow L${instId}] User ${jid} replied while question was transmitting. Buffering reply: "${rawText}"`);
         state.pendingReply = rawText || '[Resposta]';
         saveUserStates();
         return;
@@ -584,7 +634,7 @@ async function handleFlowForUser(jid, incomingText) {
 
     // If waiting for reply to a question -> user answered! Advance to next step
     if (state && state.status === 'waiting_reply') {
-        console.log(`[Baileys Flow] User ${jid} answered question step ${state.currentStepIndex + 1}: "${rawText}". Advancing to step ${state.currentStepIndex + 2}...`);
+        console.log(`[Baileys Flow L${instId}] User ${jid} answered question step ${state.currentStepIndex + 1}: "${rawText}". Advancing to step ${state.currentStepIndex + 2}...`);
         if (!state.answers) state.answers = {};
         state.answers[state.currentStepIndex] = rawText || '[Resposta]';
         state.status = 'running';
@@ -592,47 +642,50 @@ async function handleFlowForUser(jid, incomingText) {
         state.pendingReply = null;
         saveUserStates();
 
-        await executeStep(jid, state.currentStepIndex + 1);
+        await executeStep(instId, jid, state.currentStepIndex + 1);
         return;
     }
 
     // If already actively running a step or in a wait delay
     if (state && state.status === 'running') {
-        console.log(`[Baileys Flow] Flow is already active for ${jid} at step ${state.currentStepIndex + 1}. Message noted.`);
+        console.log(`[Baileys Flow L${instId}] Flow is already active for ${jid} at step ${state.currentStepIndex + 1}. Message noted.`);
         return;
     }
 
     // New conversation -> start from step 0
-    console.log(`[Baileys Flow] Starting new automated funnel for ${jid}`);
-    await executeStep(jid, 0);
+    console.log(`[Baileys Flow L${instId}] Starting new automated funnel for ${jid}`);
+    await executeStep(instId, jid, 0);
 }
 
-async function executeStep(jid, stepIndex) {
-    // Concurrency lock per user
-    if (userLocks.has(jid)) {
-        console.log(`[Baileys Lock] Step execution currently active for ${jid}, queuing step ${stepIndex}`);
-        setTimeout(() => executeStep(jid, stepIndex), 800);
+async function executeStep(instId, jid, stepIndex) {
+    const chatKey = `${instId}:${jid}`;
+    // Concurrency lock per user & line
+    if (userLocks.has(chatKey)) {
+        console.log(`[Baileys Lock] Step execution currently active for ${chatKey}, queuing step ${stepIndex}`);
+        setTimeout(() => executeStep(instId, jid, stepIndex), 800);
         return;
     }
-    userLocks.add(jid);
+    userLocks.add(chatKey);
 
     try {
         const steps = botData.steps || [];
 
         // Clear any pending wait timer
-        if (userStates[jid]?.waitTimeoutId) {
-            clearTimeout(userStates[jid].waitTimeoutId);
-            userStates[jid].waitTimeoutId = null;
+        if (userStates[chatKey]?.waitTimeoutId) {
+            clearTimeout(userStates[chatKey].waitTimeoutId);
+            userStates[chatKey].waitTimeoutId = null;
         }
 
         // Check if finished
         if (stepIndex >= steps.length) {
-            console.log(`[Baileys Flow] Flow completed for ${jid}`);
-            userStates[jid] = {
+            console.log(`[Baileys Flow L${instId}] Flow completed for ${jid}`);
+            userStates[chatKey] = {
+                instanceId: instId,
+                jid: jid,
                 currentStepIndex: steps.length,
                 status: 'completed',
                 lastActive: Date.now(),
-                answers: userStates[jid]?.answers || {},
+                answers: userStates[chatKey]?.answers || {},
                 waitTimeoutId: null
             };
             saveUserStates();
@@ -640,85 +693,93 @@ async function executeStep(jid, stepIndex) {
         }
 
         const step = steps[stepIndex];
-        console.log(`[Baileys Step ${stepIndex + 1}/${steps.length}] (${step.type}) -> ${jid}`);
+        console.log(`[Baileys Step ${stepIndex + 1}/${steps.length}] (${step.type}) -> [L${instId}] ${jid}`);
 
         if (step.type === 'message') {
-            userStates[jid] = {
+            userStates[chatKey] = {
+                instanceId: instId,
+                jid: jid,
                 currentStepIndex: stepIndex,
                 status: 'running',
                 lastActive: Date.now(),
-                answers: userStates[jid]?.answers || {},
+                answers: userStates[chatKey]?.answers || {},
                 waitTimeoutId: null
             };
             saveUserStates();
 
-            await sendStepPayload(jid, step);
+            await sendStepPayload(instId, jid, step);
 
-            if (userStates[jid] && userStates[jid].status === 'running' && liveChats[jid]?.botStatus !== 'paused') {
-                userLocks.delete(jid);
-                return executeStep(jid, stepIndex + 1);
+            if (userStates[chatKey] && userStates[chatKey].status === 'running' && liveChats[chatKey]?.botStatus !== 'paused') {
+                userLocks.delete(chatKey);
+                return executeStep(instId, jid, stepIndex + 1);
             }
         } else if (step.type === 'wait') {
-            userStates[jid] = {
+            userStates[chatKey] = {
+                instanceId: instId,
+                jid: jid,
                 currentStepIndex: stepIndex,
                 status: 'running',
                 lastActive: Date.now(),
-                answers: userStates[jid]?.answers || {},
+                answers: userStates[chatKey]?.answers || {},
                 waitTimeoutId: null
             };
             saveUserStates();
 
             const delaySec = Math.max(parseFloat(step.duration) || 2, 1);
-            console.log(`[Baileys Wait] Step ${stepIndex + 1}: Waiting ${delaySec}s before step ${stepIndex + 2} for ${jid}...`);
+            console.log(`[Baileys Wait L${instId}] Step ${stepIndex + 1}: Waiting ${delaySec}s before step ${stepIndex + 2} for ${jid}...`);
 
             const timeoutId = setTimeout(() => {
-                if (userStates[jid] && userStates[jid].status === 'running' && liveChats[jid]?.botStatus !== 'paused') {
-                    executeStep(jid, stepIndex + 1);
+                if (userStates[chatKey] && userStates[chatKey].status === 'running' && liveChats[chatKey]?.botStatus !== 'paused') {
+                    executeStep(instId, jid, stepIndex + 1);
                 }
             }, delaySec * 1000);
-            userStates[jid].waitTimeoutId = timeoutId;
+            userStates[chatKey].waitTimeoutId = timeoutId;
         } else if (step.type === 'question') {
-            userStates[jid] = {
+            userStates[chatKey] = {
+                instanceId: instId,
+                jid: jid,
                 currentStepIndex: stepIndex,
                 status: 'sending_question',
                 lastActive: Date.now(),
-                answers: userStates[jid]?.answers || {},
+                answers: userStates[chatKey]?.answers || {},
                 pendingReply: null,
                 waitTimeoutId: null
             };
             saveUserStates();
 
-            await sendStepPayload(jid, step);
+            await sendStepPayload(instId, jid, step);
 
-            if (userStates[jid] && liveChats[jid]?.botStatus !== 'paused') {
-                if (userStates[jid].pendingReply) {
-                    const buffered = userStates[jid].pendingReply;
-                    console.log(`[Baileys Flow] User ${jid} had buffered reply: "${buffered}". Advancing to step ${stepIndex + 1}`);
-                    userStates[jid].answers[stepIndex] = buffered;
-                    userStates[jid].pendingReply = null;
-                    userStates[jid].status = 'running';
-                    userStates[jid].lastActive = Date.now();
+            if (userStates[chatKey] && liveChats[chatKey]?.botStatus !== 'paused') {
+                if (userStates[chatKey].pendingReply) {
+                    const buffered = userStates[chatKey].pendingReply;
+                    console.log(`[Baileys Flow L${instId}] User ${jid} had buffered reply: "${buffered}". Advancing to step ${stepIndex + 1}`);
+                    userStates[chatKey].answers[stepIndex] = buffered;
+                    userStates[chatKey].pendingReply = null;
+                    userStates[chatKey].status = 'running';
+                    userStates[chatKey].lastActive = Date.now();
                     saveUserStates();
 
-                    userLocks.delete(jid);
-                    return executeStep(jid, stepIndex + 1);
+                    userLocks.delete(chatKey);
+                    return executeStep(instId, jid, stepIndex + 1);
                 } else {
-                    userStates[jid].status = 'waiting_reply';
-                    userStates[jid].lastActive = Date.now();
+                    userStates[chatKey].status = 'waiting_reply';
+                    userStates[chatKey].lastActive = Date.now();
                     saveUserStates();
-                    console.log(`🛑 [Baileys Question] Step ${stepIndex + 1} PAUSED. Bot is strictly waiting for user ${jid} to reply.`);
+                    console.log(`🛑 [Baileys Question L${instId}] Step ${stepIndex + 1} PAUSED. Bot waiting for user ${jid} reply.`);
                 }
             }
         }
     } catch (err) {
-        console.error(`Error in executeStep for ${jid}:`, err);
+        console.error(`Error in executeStep for [L${instId}] ${jid}:`, err);
     } finally {
-        userLocks.delete(jid);
+        userLocks.delete(chatKey);
     }
 }
 
-async function sendStepPayload(jid, step) {
-    if (!sock || !clientReady) return;
+async function sendStepPayload(instId, jid, step) {
+    const inst = instances[instId] || instances['1'];
+    if (!inst.sock || !inst.clientReady) return;
+    const sock = inst.sock;
 
     try {
         const isAudio = step.media && (step.media.endsWith('.mp3') || step.media.endsWith('.ogg') || step.media.endsWith('.m4a') || step.media.endsWith('.wav'));
@@ -753,25 +814,25 @@ async function sendStepPayload(jid, step) {
                         seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined,
                         waveform: wave
                     });
-                    recordOutgoingMessage(jid, '', step.media);
+                    recordOutgoingMessage(instId, jid, '', step.media);
                     mediaSent = true;
                 } else if (['.jpg', '.jpeg', '.png', '.gif'].includes(ext)) {
                     await sock.sendMessage(jid, {
                         image: buffer,
                         caption: step.text || undefined
                     });
-                    recordOutgoingMessage(jid, step.text || '', step.media);
+                    recordOutgoingMessage(instId, jid, step.text || '', step.media);
                     mediaSent = true;
                     return;
                 } else if (['.mp4', '.mov', '.avi'].includes(ext)) {
                     try {
-                        console.log(`[Baileys Video] Sending video to ${jid} (${step.media})`);
+                        console.log(`[Baileys Video L${instId}] Sending video to ${jid} (${step.media})`);
                         await sock.sendMessage(jid, {
                             video: buffer,
                             mimetype: 'video/mp4',
                             caption: step.text || undefined
                         });
-                        recordOutgoingMessage(jid, step.text || '', step.media);
+                        recordOutgoingMessage(instId, jid, step.text || '', step.media);
                         mediaSent = true;
                         return;
                     } catch (vidErr) {
@@ -782,7 +843,7 @@ async function sendStepPayload(jid, step) {
                             fileName: path.basename(mediaFullPath),
                             caption: step.text || undefined
                         });
-                        recordOutgoingMessage(jid, step.text || '', step.media);
+                        recordOutgoingMessage(instId, jid, step.text || '', step.media);
                         mediaSent = true;
                         return;
                     }
@@ -793,7 +854,7 @@ async function sendStepPayload(jid, step) {
                         fileName: path.basename(mediaFullPath),
                         caption: step.text || undefined
                     });
-                    recordOutgoingMessage(jid, step.text || '', step.media);
+                    recordOutgoingMessage(instId, jid, step.text || '', step.media);
                     mediaSent = true;
                     return;
                 }
@@ -802,10 +863,10 @@ async function sendStepPayload(jid, step) {
 
         if (step.text && (!mediaSent || isAudio)) {
             await sock.sendMessage(jid, { text: step.text });
-            recordOutgoingMessage(jid, step.text, null);
+            recordOutgoingMessage(instId, jid, step.text, null);
         }
     } catch (err) {
-        console.error(`Error sending step payload to ${jid}:`, err);
+        console.error(`Error sending step payload to [L${instId}] ${jid}:`, err);
     }
 }
 
@@ -854,12 +915,35 @@ app.get('/api/status', (req, res) => {
         });
     }
 
+    const inst1 = instances['1'];
+    const inst2 = instances['2'];
+
     res.json({
-        ready: clientReady,
-        qr: currentQR,
-        status: initStatus,
-        error: initError,
-        user: connectedUser
+        ready: inst1.clientReady || inst2.clientReady,
+        qr: inst1.currentQR || inst2.currentQR,
+        status: inst1.initStatus,
+        error: inst1.initError,
+        user: inst1.connectedUser,
+        instances: {
+            '1': {
+                id: '1',
+                name: 'Linha 1',
+                ready: inst1.clientReady,
+                qr: inst1.currentQR,
+                status: inst1.initStatus,
+                error: inst1.initError,
+                user: inst1.connectedUser
+            },
+            '2': {
+                id: '2',
+                name: 'Linha 2',
+                ready: inst2.clientReady,
+                qr: inst2.currentQR,
+                status: inst2.initStatus,
+                error: inst2.initError,
+                user: inst2.connectedUser
+            }
+        }
     });
 });
 
@@ -882,12 +966,14 @@ app.get('/api/test-audio', checkAuth, async (req, res) => {
 
 app.get('/api/send-test-audio', checkAuth, async (req, res) => {
     try {
-        if (!sock || !clientReady) {
-            return res.status(400).json({ error: 'WhatsApp não está conectado' });
+        const instId = String(req.query.instance || '1');
+        const inst = instances[instId] || instances['1'];
+        if (!inst.sock || !inst.clientReady) {
+            return res.status(400).json({ error: `WhatsApp (${inst.name}) não está conectado` });
         }
         let jid = req.query.jid;
-        if (!jid && connectedUser?.id) {
-            jid = connectedUser.id;
+        if (!jid && inst.connectedUser?.id) {
+            jid = inst.connectedUser.id;
         }
         if (!jid) {
             return res.status(400).json({ error: 'JID de destino não especificado' });
@@ -902,27 +988,27 @@ app.get('/api/send-test-audio', checkAuth, async (req, res) => {
             const audioInfo = await convertToWhatsAppOpus(fullPath);
             const buf = fs.readFileSync(audioInfo.path);
             const wave = generateWaveform();
-            sent = await sock.sendMessage(jid, {
+            sent = await inst.sock.sendMessage(jid, {
                 audio: buf,
                 mimetype: 'audio/ogg; codecs=opus',
                 ptt: true,
                 seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined,
                 waveform: wave
             });
-            res.json({ success: true, jid, format: 'ptt', ptt: true, file: audioInfo.path, duration: audioInfo.seconds, messageId: sent?.key?.id });
+            res.json({ success: true, jid, format: 'ptt', ptt: true, file: audioInfo.path, duration: audioInfo.seconds, messageId: sent?.key?.id, instance: instId });
         } else {
             const targetFormat = format === 'mp3' ? 'mp3' : 'm4a';
             const audioInfo = await convertToUniversalAudio(fullPath, targetFormat);
             const buf = fs.readFileSync(audioInfo.path);
             const wave = generateWaveform();
-            sent = await sock.sendMessage(jid, {
+            sent = await inst.sock.sendMessage(jid, {
                 audio: buf,
                 mimetype: targetFormat === 'm4a' ? 'audio/mp4' : 'audio/mpeg',
                 ptt: isPtt,
                 seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined,
                 waveform: wave
             });
-            res.json({ success: true, jid, format: targetFormat, ptt: isPtt, file: audioInfo.path, duration: audioInfo.seconds, messageId: sent?.key?.id });
+            res.json({ success: true, jid, format: targetFormat, ptt: isPtt, file: audioInfo.path, duration: audioInfo.seconds, messageId: sent?.key?.id, instance: instId });
         }
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -931,21 +1017,25 @@ app.get('/api/send-test-audio', checkAuth, async (req, res) => {
 
 app.post('/api/disconnect', checkAuth, async (req, res) => {
     try {
-        console.log('Baileys: User requested disconnection.');
-        clientReady = false;
-        currentQR = '';
-        connectedUser = null;
-        initStatus = 'disconnected';
-        initError = '';
+        const instId = String(req.query.instance || req.body?.instance || '1');
+        const inst = instances[instId];
+        if (inst) {
+            console.log(`Baileys [Linha ${instId}]: User requested disconnection.`);
+            inst.clientReady = false;
+            inst.currentQR = '';
+            inst.connectedUser = null;
+            inst.initStatus = 'disconnected';
+            inst.initError = '';
 
-        cleanCloseSock();
+            cleanCloseSock(instId);
 
-        try {
-            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-        } catch (e) {}
+            try {
+                fs.rmSync(inst.authDir, { recursive: true, force: true });
+            } catch (e) {}
 
-        setTimeout(initWhatsApp, 2000);
-        res.json({ success: true, message: 'Bot desconectado com sucesso.' });
+            setTimeout(() => initWhatsApp(instId), 2000);
+        }
+        res.json({ success: true, message: `Linha ${instId} desconectada com sucesso.` });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -953,22 +1043,29 @@ app.post('/api/disconnect', checkAuth, async (req, res) => {
 
 app.post('/api/restart', checkAuth, async (req, res) => {
     try {
-        console.log('Baileys: Reconnection / QR code refresh requested.');
-        clientReady = false;
-        connectedUser = null;
-        currentQR = '';
-        initStatus = 'connecting';
-        initError = '';
-        consecutiveDisconnects = 0;
+        const instId = String(req.query.instance || req.body?.instance || 'all');
+        const targetIds = instId === 'all' ? ['1', '2'] : [instId];
 
-        cleanCloseSock();
-        // If clean requested or if bot was not connected, wipe auth files to guarantee fresh QR
-        if (req.query.clean === 'true' || req.body?.clean === true || !clientReady) {
-            try {
-                fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-            } catch (e) {}
+        for (const id of targetIds) {
+            const inst = instances[id];
+            if (!inst) continue;
+            console.log(`Baileys [Linha ${id}]: Reconnection / QR refresh requested.`);
+            inst.clientReady = false;
+            inst.connectedUser = null;
+            inst.currentQR = '';
+            inst.initStatus = 'connecting';
+            inst.initError = '';
+            inst.consecutiveDisconnects = 0;
+
+            cleanCloseSock(id);
+            if (req.query.clean === 'true' || req.body?.clean === true || !inst.clientReady) {
+                try {
+                    fs.rmSync(inst.authDir, { recursive: true, force: true });
+                } catch (e) {}
+            }
+            setTimeout(() => initWhatsApp(id), 1000);
         }
-        setTimeout(initWhatsApp, 1000);
+
         res.json({ success: true, message: 'Gerando novo código QR...' });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -1017,52 +1114,71 @@ app.get('/api/chats', checkAuth, (req, res) => {
 });
 
 app.get('/api/messages/:jid', checkAuth, (req, res) => {
-    const jid = req.params.jid;
-    const chat = liveChats[jid];
+    const rawKey = req.params.jid;
+    const chat = liveChats[rawKey] || liveChats[`1:${rawKey}`] || liveChats[`2:${rawKey}`];
     if (chat) {
         chat.unread = 0;
         saveChats();
-        res.json({ success: true, chat: chat, flowState: userStates[jid] || null });
+        const fullKey = chat.id;
+        res.json({ success: true, chat: chat, flowState: userStates[fullKey] || null });
     } else {
         res.status(404).json({ error: 'Chat not found' });
     }
 });
 
 app.post('/api/reset-user/:jid', checkAuth, (req, res) => {
-    const jid = req.params.jid;
-    if (userStates[jid]?.waitTimeoutId) {
-        clearTimeout(userStates[jid].waitTimeoutId);
+    const rawKey = req.params.jid;
+    const chat = liveChats[rawKey] || liveChats[`1:${rawKey}`] || liveChats[`2:${rawKey}`];
+    const fullKey = chat ? chat.id : (rawKey.includes(':') ? rawKey : `1:${rawKey}`);
+
+    if (userStates[fullKey]?.waitTimeoutId) {
+        clearTimeout(userStates[fullKey].waitTimeoutId);
     }
-    delete userStates[jid];
+    delete userStates[fullKey];
     saveUserStates();
-    if (liveChats[jid]) {
-        liveChats[jid].botStatus = 'active';
+
+    if (liveChats[fullKey]) {
+        liveChats[fullKey].botStatus = 'active';
         saveChats();
     }
     res.json({ success: true, message: 'Fluxo reiniciado com sucesso para este contato.' });
 });
 
 app.post('/api/send', checkAuth, async (req, res) => {
-    const { jid, message } = req.body;
-    if (!jid || !message) {
-        return res.status(400).json({ error: 'jid and message required' });
+    const { jid, message, instanceId, chatKey } = req.body;
+    if (!message || (!jid && !chatKey)) {
+        return res.status(400).json({ error: 'jid ou chatKey e mensagem são obrigatórios' });
     }
 
-    if (!sock || !clientReady) {
-        return res.status(503).json({ error: 'WhatsApp is not connected' });
+    let actualJid = jid;
+    let actualInstId = instanceId || '1';
+
+    const rawKey = chatKey || jid;
+    if (liveChats[rawKey]) {
+        actualInstId = liveChats[rawKey].instanceId || actualInstId;
+        actualJid = liveChats[rawKey].jid || actualJid;
+    } else if (rawKey.includes(':')) {
+        const parts = rawKey.split(':');
+        actualInstId = parts[0];
+        actualJid = parts[1];
+    }
+
+    const inst = instances[actualInstId] || instances['1'];
+    if (!inst.sock || !inst.clientReady) {
+        return res.status(503).json({ error: `WhatsApp (${inst.name}) não está conectado.` });
     }
 
     try {
-        await sock.sendMessage(jid, { text: message });
-        recordOutgoingMessage(jid, message, null);
+        await inst.sock.sendMessage(actualJid, { text: message });
+        recordOutgoingMessage(actualInstId, actualJid, message, null);
 
-        // Pause automated bot for this conversation so human can take over
-        if (liveChats[jid]) {
-            liveChats[jid].botStatus = 'paused';
+        const fullChatKey = `${actualInstId}:${actualJid}`;
+        if (liveChats[fullChatKey]) {
+            liveChats[fullChatKey].botStatus = 'paused';
             saveChats();
         }
-        if (userStates[jid]) {
-            userStates[jid].status = 'paused';
+        if (userStates[fullChatKey]) {
+            userStates[fullChatKey].status = 'paused';
         }
 
         res.json({ success: true });
@@ -1073,16 +1189,18 @@ app.post('/api/send', checkAuth, async (req, res) => {
 });
 
 app.post('/api/bot-toggle/:jid', checkAuth, (req, res) => {
-    const jid = req.params.jid;
-    if (!liveChats[jid]) {
+    const rawKey = req.params.jid;
+    const chat = liveChats[rawKey] || liveChats[`1:${rawKey}`] || liveChats[`2:${rawKey}`];
+    if (!chat) {
         return res.status(404).json({ error: 'Chat not found' });
     }
-    const current = liveChats[jid].botStatus || 'active';
+    const current = chat.botStatus || 'active';
     const nextStatus = current === 'active' ? 'paused' : 'active';
-    liveChats[jid].botStatus = nextStatus;
+    chat.botStatus = nextStatus;
 
-    if (userStates[jid]) {
-        userStates[jid].status = nextStatus === 'paused' ? 'paused' : 'running';
+    const fullKey = chat.id;
+    if (userStates[fullKey]) {
+        userStates[fullKey].status = nextStatus === 'paused' ? 'paused' : 'running';
     }
     saveChats();
     res.json({ success: true, botStatus: nextStatus });
@@ -1145,6 +1263,7 @@ function startAntiSleep() {
 
 app.listen(PORT, HOST, () => {
     console.log(`Umbler Talk Bot Server running on http://${HOST}:${PORT}`);
-    initWhatsApp();
+    initWhatsApp('1');
+    initWhatsApp('2');
     startAntiSleep();
 });
