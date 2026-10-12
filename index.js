@@ -731,16 +731,21 @@ async function sendStepPayload(jid, step) {
     try {
         const isAudio = step.media && (step.media.endsWith('.mp3') || step.media.endsWith('.ogg') || step.media.endsWith('.m4a') || step.media.endsWith('.wav'));
         
-        if (isAudio) {
-            await sock.sendPresenceUpdate('recording', jid);
-        } else {
-            await sock.sendPresenceUpdate('composing', jid);
-        }
+        try {
+            if (isAudio) {
+                await sock.sendPresenceUpdate('recording', jid);
+            } else {
+                await sock.sendPresenceUpdate('composing', jid);
+            }
+        } catch (presErr) {}
 
         const textLen = step.text ? step.text.length : 0;
         const typingDelayMs = Math.min(Math.max(textLen * 35, 1200), 4000);
         await delay(typingDelayMs);
-        await sock.sendPresenceUpdate('paused', jid);
+
+        try {
+            await sock.sendPresenceUpdate('paused', jid);
+        } catch (presErr) {}
 
         let mediaSent = false;
         if (step.media) {
