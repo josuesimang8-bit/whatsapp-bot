@@ -5,6 +5,7 @@ const {
     DisconnectReason,
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
+    Browsers,
     delay
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
@@ -317,10 +318,10 @@ async function initWhatsApp(instId = '1') {
                 creds: state.creds,
                 keys: makeCacheableSignalKeyStore(state.keys, logger)
             },
-            browser: [`Umbler Talk L${instId}`, 'Desktop', '1.0.0'],
+            browser: instId === '1' ? Browsers.macOS('Desktop') : Browsers.ubuntu('Chrome'),
             generateHighQualityLinkPreview: true,
             syncFullHistory: false,
-            keepAliveIntervalMs: 15000,
+            keepAliveIntervalMs: 25000,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             retryRequestDelayMs: 500,
@@ -353,18 +354,16 @@ async function initWhatsApp(instId = '1') {
                 console.log(`Baileys [Linha ${instId}]: Connection closed. Status: ${statusCode || 'unknown'} (${errorMsg}). LoggedOut: ${isLoggedOut}. Disconnects: ${inst.consecutiveDisconnects}`);
 
                 inst.clientReady = false;
-                inst.connectedUser = null;
                 cleanCloseSock(instId);
 
-                const shouldClearAuth = isLoggedOut || 
-                    statusCode === 401 || 
-                    statusCode === 403 || 
-                    (inst.consecutiveDisconnects >= 2 && !inst.connectedUser);
+                // ONLY clear session if WhatsApp explicitly reports loggedOut (401) or forbidden (403)
+                const isExplicitLogout = isLoggedOut || statusCode === 401 || statusCode === 403;
 
-                if (shouldClearAuth) {
-                    console.log(`Baileys [Linha ${instId}]: Session invalid or disconnected. Removing auth files to generate fresh QR code.`);
+                if (isExplicitLogout) {
+                    console.log(`Baileys [Linha ${instId}]: Logged out by WhatsApp. Removing session files.`);
+                    inst.connectedUser = null;
                     inst.initStatus = 'waiting_qr';
-                    inst.initError = 'Escaneie o código QR para conectar.';
+                    inst.initError = 'Dispositivo desconectado pelo WhatsApp. Escaneie novo QR Code.';
                     inst.consecutiveDisconnects = 0;
                     inst.currentQR = '';
                     try {
@@ -372,10 +371,13 @@ async function initWhatsApp(instId = '1') {
                     } catch (e) {}
                     setTimeout(() => initWhatsApp(instId), 1500);
                 } else {
-                    console.log(`Baileys [Linha ${instId}]: Reconnecting in 3s (Reason: ${statusCode || errorMsg})...`);
+                    // Normal disconnect, restart required (515) or network blip - reconnect using existing creds!
+                    const isRestartRequired = statusCode === DisconnectReason.restartRequired || statusCode === 515;
+                    const delayMs = isRestartRequired ? 1000 : Math.min(inst.consecutiveDisconnects * 2000, 10000);
+                    console.log(`Baileys [Linha ${instId}]: Reconnecting in ${delayMs}ms (Reason: ${statusCode || errorMsg}, RestartRequired: ${isRestartRequired})...`);
                     inst.initStatus = 'connecting';
                     inst.initError = 'Reconectando ao WhatsApp...';
-                    setTimeout(() => initWhatsApp(instId), 3000);
+                    setTimeout(() => initWhatsApp(instId), delayMs);
                 }
             } else if (connection === 'open') {
                 console.log(`Baileys [Linha ${instId}]: Connected successfully!`);
@@ -398,39 +400,47 @@ async function initWhatsApp(instId = '1') {
 
         // Messages handling
         inst.sock.ev.on('messages.upsert', async (m) => {
-            if (m.type !== 'notify') return;
+            try {
+                if (m.type !== 'notify') return;
 
-            for (const msg of m.messages) {
-                if (msg.key.fromMe) continue;
+                for (const msg of m.messages) {
+                    try {
+                        if (msg.key.fromMe) continue;
 
-                const jid = msg.key.remoteJid;
-                if (!jid || jid.endsWith('@g.us') || jid.includes('status@broadcast')) continue;
+                        const jid = msg.key.remoteJid;
+                        if (!jid || jid.endsWith('@g.us') || jid.includes('status@broadcast')) continue;
 
-                const msgTimestamp = Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000);
-                if (msgTimestamp < inst.readyTimestamp) {
-                    continue;
+                        const msgTimestamp = Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000);
+                        if (msgTimestamp < inst.readyTimestamp) {
+                            continue;
+                        }
+
+                        const text = msg.message?.conversation ||
+                                     msg.message?.extendedTextMessage?.text ||
+                                     msg.message?.imageMessage?.caption ||
+                                     msg.message?.videoMessage?.caption || '';
+
+                        const incomingContent = text || (
+                            msg.message?.audioMessage ? '[Áudio recebido]' :
+                            msg.message?.imageMessage ? '[Imagem recebida]' :
+                            msg.message?.videoMessage ? '[Vídeo recebido]' :
+                            msg.message?.documentMessage ? '[Documento recebido]' :
+                            msg.message?.stickerMessage ? '[Figurinha]' : '[Mensagem]'
+                        );
+
+                        console.log(`[Baileys Linha ${instId}] ${jid}: "${text || incomingContent}"`);
+
+                        recordIncomingMessage(instId, jid, text || incomingContent, msg);
+
+                        if (inst.clientReady) {
+                            await handleFlowForUser(instId, jid, text || incomingContent);
+                        }
+                    } catch (msgErr) {
+                        console.error(`[Baileys Linha ${instId}] Error handling single message:`, msgErr);
+                    }
                 }
-
-                const text = msg.message?.conversation ||
-                             msg.message?.extendedTextMessage?.text ||
-                             msg.message?.imageMessage?.caption ||
-                             msg.message?.videoMessage?.caption || '';
-
-                const incomingContent = text || (
-                    msg.message?.audioMessage ? '[Áudio recebido]' :
-                    msg.message?.imageMessage ? '[Imagem recebida]' :
-                    msg.message?.videoMessage ? '[Vídeo recebido]' :
-                    msg.message?.documentMessage ? '[Documento recebido]' :
-                    msg.message?.stickerMessage ? '[Figurinha]' : '[Mensagem]'
-                );
-
-                console.log(`[Baileys Linha ${instId}] ${jid}: "${text || incomingContent}"`);
-
-                recordIncomingMessage(instId, jid, text || incomingContent, msg);
-
-                if (inst.clientReady) {
-                    await handleFlowForUser(instId, jid, text || incomingContent);
-                }
+            } catch (err) {
+                console.error(`[Baileys Linha ${instId}] Error in messages.upsert:`, err);
             }
         });
 
