@@ -1,6 +1,9 @@
 services:
   - type: web
-    name: whatsapp-bot
+    name: whatsapp-bot-linha2
     runtime: docker
     plan: free
     dockerfilePath: ./Dockerfile
+    envVars:
+      - key: ACCESS_PIN
+        value: "201707"
