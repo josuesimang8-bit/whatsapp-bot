@@ -1083,42 +1083,70 @@
             </div>
         </header>
 
-        <!-- PANEL 1: CONEXÃO WHATSAPP (QR CODE) -->
+        <!-- PANEL 1: CONEXÃO WHATSAPP (QR CODE & CÓDIGO DE 8 DÍGITOS) -->
         <section class="content-panel" id="panel-connect">
             <div class="connect-container">
-                <div class="connect-card">
+                <div class="connect-card" style="max-width: 580px;">
                     
-                    <!-- Disconnected View (QR Code) -->
+                    <!-- Anti-Ban Shield Status Banner -->
+                    <div style="background: #ECFDF5; border: 1px solid #A7F3D0; color: #065F46; padding: 10px 14px; border-radius: 10px; font-size: 12px; font-weight: 700; margin-bottom: 18px; display: flex; align-items: center; justify-content: center; gap: 8px;">
+                        <span>🛡️ Escudo Anti-Ban 7 Camadas Ativo</span>
+                        <span style="font-weight: 500; color: #047857;">(Leitura Humana • Digitação Realista • Hash Único • Fila Única)</span>
+                    </div>
+
+                    <!-- Disconnected View (QR Code + Pairing Code) -->
                     <div id="qrBox">
-                        <h2 style="font-size: 20px; font-weight: 800; margin-bottom: 6px;">Conectar WhatsApp</h2>
-                        <p style="color: var(--text-muted); font-size: 13px;">Conexão instantânea via Baileys multi-aparelhos</p>
+                        <h2 style="font-size: 20px; font-weight: 800; margin-bottom: 4px;">Conectar WhatsApp</h2>
+                        <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 14px;">Conecta pelo Código de 8 Dígitos (sem usar câmera) ou pelo QR Code abaixo</p>
+
+                        <!-- Option 1: Connect via Phone Number (8-Digit Code) -->
+                        <div style="background: #F8FAFC; border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 18px; text-align: left;">
+                            <div style="font-size: 13px; font-weight: 700; color: var(--text-main); margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">
+                                📱 Opção 1: Conectar com Número (Sem QR Code)
+                            </div>
+                            <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 10px;">
+                                Digite o seu número com código do país (ex: <strong>258841234567</strong>) para receber um código de 8 dígitos e digitar no seu WhatsApp:
+                            </div>
+                            <div style="display: flex; gap: 8px;">
+                                <input type="text" id="pairPhoneInput" placeholder="Ex: 258841234567" style="flex: 1; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; font-weight: 600; outline: none;">
+                                <button class="btn btn-primary" id="pairCodeBtn" onclick="requestPairCode()" style="white-space: nowrap;">
+                                    🔑 Gerar Código
+                                </button>
+                            </div>
+                            <div id="pairCodeResultBox" style="display: none; margin-top: 12px; background: #EEF2FF; border: 2px dashed #6C5CE7; border-radius: 10px; padding: 12px; text-align: center;">
+                                <div style="font-size: 11px; color: #4F46E5; font-weight: 700; text-transform: uppercase; margin-bottom: 4px;">Digite este código na notificação do seu WhatsApp:</div>
+                                <div id="pairCodeText" style="font-size: 26px; font-weight: 900; letter-spacing: 5px; color: #1E1B4B; font-family: monospace;">XXXX-XXXX</div>
+                                <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">No WhatsApp: Aparelhos conectados &gt; Conectar um aparelho &gt; <strong>Conectar com número de telefone</strong></div>
+                            </div>
+                        </div>
+
+                        <!-- Option 2: QR Code -->
+                        <div style="font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">
+                            📷 Opção 2: Escanear QR Code
+                        </div>
                         
-                        <div class="qr-frame" id="qrFrame" style="min-width: 280px; min-height: 280px; display: inline-flex; align-items: center; justify-content: center;">
+                        <div class="qr-frame" id="qrFrame" style="min-width: 260px; min-height: 260px; margin: 10px 0 14px 0; display: inline-flex; align-items: center; justify-content: center;">
                             <div id="qrLoading" style="display: none; padding: 40px 20px; text-align: center;">
                                 <div style="font-size: 32px; animation: spin 1.2s linear infinite; display: inline-block;">🔄</div>
                                 <div style="margin-top: 12px; font-weight: 600; color: var(--text-muted); font-size: 13px;" id="qrLoadingText">A gerar código QR...</div>
                             </div>
-                            <img id="qrImg" src="" alt="Código QR WhatsApp" style="display: none; width: 250px; height: 250px;">
+                            <img id="qrImg" src="" alt="Código QR WhatsApp" style="display: none; width: 240px; height: 240px;">
                         </div>
 
                         <div style="margin-bottom: 15px; display: flex; gap: 8px; justify-content: center;">
-                            <button class="btn btn-primary" style="font-size: 13px; font-weight: 700;" onclick="refreshNewQR()">
-                                🔄 Gerar Novo QR Code
+                            <button class="btn btn-outline" style="font-size: 13px; font-weight: 700;" onclick="refreshNewQR()">
+                                🔄 Atualizar QR Code
                             </button>
                         </div>
 
                         <div class="steps-list">
                             <div class="step-item">
                                 <div class="step-number">1</div>
-                                <div>Abra o aplicativo do <strong>WhatsApp</strong> no seu telemóvel.</div>
+                                <div>Abra o <strong>WhatsApp</strong> no seu telemóvel &gt; <strong>Aparelhos conectados</strong>.</div>
                             </div>
                             <div class="step-item">
                                 <div class="step-number">2</div>
-                                <div>Toque nos <strong>três pontos (ou Configurações)</strong> &gt; <strong>Aparelhos conectados</strong>.</div>
-                            </div>
-                            <div class="step-item">
-                                <div class="step-number">3</div>
-                                <div>Toque em <strong>Conectar um aparelho</strong> e aponte a câmera para o QR code acima.</div>
+                                <div>Toque em <strong>Conectar um aparelho</strong> (pode ler o QR Code ou tocar em <strong>"Conectar com número de telefone"</strong>).</div>
                             </div>
                         </div>
                     </div>
@@ -1126,9 +1154,9 @@
                     <!-- Connected View -->
                     <div id="connectedBox" class="connected-state">
                         <div class="connected-icon-box">✓</div>
-                        <h2 style="font-size: 20px; font-weight: 800; color: var(--text-main); margin-bottom: 6px;">WhatsApp Conectado!</h2>
+                        <h2 style="font-size: 20px; font-weight: 800; color: var(--text-main); margin-bottom: 6px;">WhatsApp Conectado e Protegido!</h2>
                         <p style="color: var(--text-muted); font-size: 14px; margin-bottom: 24px;">
-                            O bot está pronto e respondendo automaticamente aos clientes 24/7.
+                            O bot está a responder automaticamente com simulação humana realista e proteção Anti-Ban ativa.
                         </p>
                         <div style="background: #F8FAFC; border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 24px; text-align: left;">
                             <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 4px;">Número Conectado:</div>
@@ -1477,8 +1505,52 @@
             setTimeout(checkStatus, 3000);
         }
 
+        async function requestPairCode() {
+            const input = document.getElementById('pairPhoneInput');
+            const btn = document.getElementById('pairCodeBtn');
+            const resultBox = document.getElementById('pairCodeResultBox');
+            const codeText = document.getElementById('pairCodeText');
+            const phone = (input?.value || '').trim();
+
+            if (!phone) {
+                showToast('Digite o número com código do país (ex: 258841234567)');
+                if (input) input.focus();
+                return;
+            }
+
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = '⏳ Gerando...';
+            }
+
+            try {
+                const res = await fetch('/api/pair-code', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phone })
+                });
+                const data = await res.json();
+                if (res.ok && data.success && data.code) {
+                    if (codeText) codeText.innerText = data.code;
+                    if (resultBox) resultBox.style.display = 'block';
+                    showToast('Código de 8 dígitos gerado! Digite no seu WhatsApp.');
+                } else {
+                    showToast(data.error || 'Erro ao gerar código.');
+                }
+            } catch (e) {
+                showToast('Erro de conexão ao solicitar código.');
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = '🔑 Gerar Código';
+                }
+            }
+        }
+
         async function refreshNewQR() {
             showToast('A gerar novo código QR limpo...');
+            const resultBox = document.getElementById('pairCodeResultBox');
+            if (resultBox) resultBox.style.display = 'none';
             const qrLoading = document.getElementById('qrLoading');
             const qrLoadingText = document.getElementById('qrLoadingText');
             const qrImg = document.getElementById('qrImg');

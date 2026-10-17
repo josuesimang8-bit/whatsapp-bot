@@ -222,7 +222,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-// WhatsApp Connection State (Baileys)
+// WhatsApp Connection State (Baileys) + 7-Layer Anti-Ban Shield
 let sock = null;
 let currentQR = '';
 let clientReady = false;
@@ -235,6 +235,103 @@ let consecutiveDisconnects = 0;
 const AUTH_DIR = path.join(__dirname, 'auth_info_baileys');
 const logger = pino({ level: 'silent' });
 let isInitializing = false;
+
+// ==================== 7-LAYER ANTI-BAN SHIELD HELPERS ====================
+const processedMsgIds = new Set();
+const lastIncomingKeys = new Map(); // jid -> msg.key for authentic read receipts
+let offlinePresenceTimer = null;
+let globalSendQueue = Promise.resolve();
+let lastHandledJid = null;
+
+function randomInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// Layer 4A: Invisible zero-width text randomization so every outgoing text has a unique SHA-256 hash
+const ZERO_WIDTH_CHARS = ['\u200B', '\u200C', '\u200D'];
+function humanizeText(text) {
+    if (!text || typeof text !== 'string') return text;
+    const words = text.split(' ');
+    if (words.length <= 1) {
+        const zw = ZERO_WIDTH_CHARS[randomInt(0, ZERO_WIDTH_CHARS.length - 1)];
+        return text + zw;
+    }
+    const insertions = randomInt(2, Math.min(5, words.length));
+    for (let i = 0; i < insertions; i++) {
+        const idx = randomInt(0, words.length - 1);
+        const zw = ZERO_WIDTH_CHARS[randomInt(0, ZERO_WIDTH_CHARS.length - 1)];
+        words[idx] = words[idx] + zw;
+    }
+    return words.join(' ');
+}
+
+// Layer 4B: Media buffer cryptographic salt (appends harmless random trailing bytes to change SHA-256/MD5 hash)
+function humanizeMediaBuffer(buffer) {
+    if (!Buffer.isBuffer(buffer)) return buffer;
+    const salt = crypto.randomBytes(randomInt(4, 16));
+    return Buffer.concat([buffer, salt]);
+}
+
+// Layer 1: Unwrap ephemeral / viewOnce containers and strictly ignore internal protocol packets
+function unwrapMessage(message) {
+    if (!message) return null;
+    if (message.ephemeralMessage?.message) return unwrapMessage(message.ephemeralMessage.message);
+    if (message.viewOnceMessage?.message) return unwrapMessage(message.viewOnceMessage.message);
+    if (message.viewOnceMessageV2?.message) return unwrapMessage(message.viewOnceMessageV2.message);
+    if (message.viewOnceMessageV2Extension?.message) return unwrapMessage(message.viewOnceMessageV2Extension.message);
+    if (message.documentWithCaptionMessage?.message) return unwrapMessage(message.documentWithCaptionMessage.message);
+    if (message.editedMessage?.message) return unwrapMessage(message.editedMessage.message);
+    return message;
+}
+
+// Layer 6: Automatic offline presence after idle period (avoids 24/7 online bot signature)
+function scheduleOfflinePresence() {
+    if (offlinePresenceTimer) clearTimeout(offlinePresenceTimer);
+    offlinePresenceTimer = setTimeout(async () => {
+        if (sock && clientReady) {
+            try {
+                await sock.sendPresenceUpdate('unavailable');
+            } catch (e) {}
+        }
+    }, randomInt(14000, 24000));
+}
+
+// Layer 2: Authentic Human Read Receipt (Blue Ticks) & Reaction Delay
+async function simulateHumanRead(jid) {
+    if (!sock || !clientReady) return;
+    const msgKey = lastIncomingKeys.get(jid);
+    if (!msgKey) return;
+    lastIncomingKeys.delete(jid);
+
+    try {
+        // 1. Wait 2.0s - 4.5s simulating human picking up phone after notification
+        await delay(randomInt(2000, 4500));
+        // 2. Come online
+        await sock.sendPresenceUpdate('available', jid);
+        // 3. Mark message as read (blue ticks) just like opening the chat in official WhatsApp
+        await sock.readMessages([msgKey]);
+        // 4. Wait 1.4s - 3.0s simulating human reading the message before typing
+        await delay(randomInt(14000 / 10, 3000));
+        scheduleOfflinePresence();
+    } catch (e) {}
+}
+
+// Layer 5: Global Single-Human Send Queue (prevents typing in multiple chats simultaneously)
+function enqueueHumanSend(jid, taskFn) {
+    const nextTask = globalSendQueue.then(async () => {
+        if (lastHandledJid && lastHandledJid !== jid) {
+            // Natural pause when switching between different customer chats
+            await delay(randomInt(2000, 3800));
+        }
+        lastHandledJid = jid;
+        return await taskFn();
+    }).catch((err) => {
+        console.error('[Anti-Ban Queue Error]:', err);
+    });
+    globalSendQueue = nextTask;
+    return nextTask;
+}
+// =========================================================================
 
 function cleanCloseSock() {
     if (sock) {
@@ -259,7 +356,7 @@ async function initWhatsApp() {
     }
 
     isInitializing = true;
-    console.log('Baileys: Initializing connection...');
+    console.log('Baileys: Initializing connection with 7-Layer Anti-Ban Shield...');
     initStatus = 'connecting';
     initError = '';
 
@@ -283,14 +380,15 @@ async function initWhatsApp() {
                 creds: state.creds,
                 keys: makeCacheableSignalKeyStore(state.keys, logger)
             },
-            browser: Browsers.macOS('Desktop'),
-            generateHighQualityLinkPreview: true,
+            browser: Browsers.ubuntu('Chrome'),
+            markOnlineOnConnect: false,
+            generateHighQualityLinkPreview: false,
             syncFullHistory: false,
-            keepAliveIntervalMs: 25000,
+            keepAliveIntervalMs: 30000,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
-            retryRequestDelayMs: 500,
-            maxMsgRetryCount: 5
+            retryRequestDelayMs: 1000,
+            maxMsgRetryCount: 3
         });
 
         sock.ev.on('creds.update', saveCreds);
@@ -327,23 +425,23 @@ async function initWhatsApp() {
                     console.log('Baileys: Logged out by WhatsApp. Removing auth files to generate fresh QR code.');
                     connectedUser = null;
                     initStatus = 'waiting_qr';
-                    initError = 'Dispositivo desconectado pelo WhatsApp. Escaneie novo QR Code.';
+                    initError = 'Dispositivo desconectado pelo WhatsApp. Conecte novamente via Código de 8 Dígitos ou QR Code.';
                     consecutiveDisconnects = 0;
                     currentQR = '';
                     try {
                         fs.rmSync(AUTH_DIR, { recursive: true, force: true });
                     } catch (e) {}
-                    setTimeout(initWhatsApp, 1500);
+                    setTimeout(initWhatsApp, 2000);
                 } else {
                     const isRestartRequired = statusCode === DisconnectReason.restartRequired || statusCode === 515;
-                    const delayMs = isRestartRequired ? 1000 : Math.min(consecutiveDisconnects * 2000, 10000);
+                    const delayMs = isRestartRequired ? 1200 : Math.min(consecutiveDisconnects * 2500, 12000);
                     console.log(`Baileys: Reconnecting in ${delayMs}ms (Reason: ${statusCode || errorMsg}, RestartRequired: ${isRestartRequired})...`);
                     initStatus = 'connecting';
                     initError = 'Reconectando ao WhatsApp...';
                     setTimeout(initWhatsApp, delayMs);
                 }
             } else if (connection === 'open') {
-                console.log('Baileys: Connected successfully!');
+                console.log('Baileys: Connected successfully with Anti-Ban Shield active!');
                 clientReady = true;
                 consecutiveDisconnects = 0;
                 initStatus = 'ready';
@@ -358,52 +456,98 @@ async function initWhatsApp() {
                     phone: '+' + phone,
                     name: sock.user?.name || phone
                 };
+
+                // Start in stealth unavailable mode after connecting
+                scheduleOfflinePresence();
             }
         });
 
-        // Messages handling
+        // Messages handling (Protected by Layer 1 Strict Real-Message Filter)
         sock.ev.on('messages.upsert', async (m) => {
             try {
                 if (m.type !== 'notify') return;
 
                 for (const msg of m.messages) {
                     try {
-                        // Ignore outgoing messages sent by the bot
-                        if (msg.key.fromMe) continue;
+                        // Ignore outgoing messages or missing keys
+                        if (!msg.key || msg.key.fromMe) continue;
 
                         const jid = msg.key.remoteJid;
-                        // Ignore group chats and status/broadcasts
-                        if (!jid || jid.endsWith('@g.us') || jid.includes('status@broadcast')) continue;
+                        // Strictly allow only direct 1-on-1 user chats (ignore groups, status, broadcasts, newsletters)
+                        if (!jid || jid.endsWith('@g.us') || jid.includes('broadcast') || jid.endsWith('@newsletter')) continue;
+
+                        // Deduplicate message IDs so WhatsApp retries never trigger duplicate replies
+                        if (msg.key.id) {
+                            if (processedMsgIds.has(msg.key.id)) continue;
+                            processedMsgIds.add(msg.key.id);
+                            if (processedMsgIds.size > 2000) {
+                                const firstKey = processedMsgIds.values().next().value;
+                                processedMsgIds.delete(firstKey);
+                            }
+                        }
 
                         // Ignore catch-up messages from before the bot connected
                         const msgTimestamp = Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000);
-                        if (msgTimestamp < readyTimestamp) {
-                            console.log(`Ignoring old message from ${jid}`);
+                        if (msgTimestamp < readyTimestamp - 5) {
                             continue;
                         }
 
-                        // Extract message body text or media type
-                        const text = msg.message?.conversation ||
-                                     msg.message?.extendedTextMessage?.text ||
-                                     msg.message?.imageMessage?.caption ||
-                                     msg.message?.videoMessage?.caption || '';
+                        // Unwrap ephemeral / viewOnce containers
+                        const rawMsg = unwrapMessage(msg.message);
+                        if (!rawMsg) continue;
 
-                        const incomingContent = text || (
-                            msg.message?.audioMessage ? '[Áudio recebido]' :
-                            msg.message?.imageMessage ? '[Imagem recebida]' :
-                            msg.message?.videoMessage ? '[Vídeo recebido]' :
-                            msg.message?.documentMessage ? '[Documento recebido]' :
-                            msg.message?.stickerMessage ? '[Figurinha]' : '[Mensagem]'
-                        );
+                        // Strictly ignore WhatsApp internal protocol / encryption / reaction / receipt packets
+                        if (
+                            rawMsg.protocolMessage ||
+                            rawMsg.senderKeyDistributionMessage ||
+                            rawMsg.reactionMessage ||
+                            rawMsg.pollUpdateMessage ||
+                            rawMsg.keepInChatMessage ||
+                            rawMsg.pinInChatMessage ||
+                            rawMsg.encReactionMessage
+                        ) {
+                            continue;
+                        }
 
-                        console.log(`[Baileys Incoming] ${jid}: "${text || incomingContent}"`);
+                        // Extract authentic human text or explicit media attachment
+                        const text = (
+                            rawMsg.conversation ||
+                            rawMsg.extendedTextMessage?.text ||
+                            rawMsg.imageMessage?.caption ||
+                            rawMsg.videoMessage?.caption ||
+                            rawMsg.buttonsResponseMessage?.selectedDisplayText ||
+                            rawMsg.listResponseMessage?.title ||
+                            rawMsg.templateButtonReplyMessage?.selectedDisplayText ||
+                            ''
+                        ).trim();
+
+                        const mediaTypeLabel =
+                            rawMsg.audioMessage ? '[Áudio recebido]' :
+                            rawMsg.imageMessage ? '[Imagem recebida]' :
+                            rawMsg.videoMessage ? '[Vídeo recebido]' :
+                            rawMsg.documentMessage ? '[Documento recebido]' :
+                            rawMsg.stickerMessage ? '[Figurinha]' :
+                            (rawMsg.contactMessage || rawMsg.contactsArrayMessage) ? '[Contato]' :
+                            (rawMsg.locationMessage || rawMsg.liveLocationMessage) ? '[Localização]' : '';
+
+                        // CRITICAL ANTI-BAN GUARD: If there is neither real text nor real media, DO NOT reply!
+                        const incomingContent = text || mediaTypeLabel;
+                        if (!incomingContent) {
+                            console.log(`[Anti-Ban Guard] Ignored non-content system packet from ${jid}`);
+                            continue;
+                        }
+
+                        console.log(`[Baileys Incoming] ${jid}: "${incomingContent}"`);
+
+                        // Store message key so Layer 2 can mark it as read (blue ticks) naturally
+                        lastIncomingKeys.set(jid, msg.key);
 
                         // Save to live chat history
-                        recordIncomingMessage(jid, text || incomingContent, msg);
+                        recordIncomingMessage(jid, incomingContent, msg);
 
                         // Handle automated flow execution
                         if (clientReady) {
-                            await handleFlowForUser(jid, text || incomingContent);
+                            await handleFlowForUser(jid, incomingContent);
                         }
                     } catch (msgErr) {
                         console.error('Error handling single message:', msgErr);
@@ -556,8 +700,9 @@ async function handleFlowForUser(jid, incomingText) {
             saveChats();
         }
         if (sock && clientReady) {
+            await simulateHumanRead(jid);
             await sock.sendMessage(jid, {
-                text: '🔄 O seu fluxo foi reiniciado com sucesso!\nEnvie qualquer mensagem para começar novamente.'
+                text: humanizeText('🔄 O seu fluxo foi reiniciado com sucesso!\nEnvie qualquer mensagem para começar novamente.')
             });
         }
         return;
@@ -600,6 +745,7 @@ async function handleFlowForUser(jid, incomingText) {
         state.pendingReply = null;
         saveUserStates();
 
+        await simulateHumanRead(jid);
         await executeStep(jid, state.currentStepIndex + 1);
         return;
     }
@@ -610,8 +756,19 @@ async function handleFlowForUser(jid, incomingText) {
         return;
     }
 
-    // New conversation -> start from step 0
+    // New conversation -> reserve state immediately to prevent double-start, simulate human read, then start step 0
     console.log(`[Baileys Flow] Starting new automated funnel for ${jid}`);
+    userStates[jid] = {
+        currentStepIndex: 0,
+        status: 'running',
+        lastActive: Date.now(),
+        answers: {},
+        pendingReply: null,
+        waitTimeoutId: null
+    };
+    saveUserStates();
+
+    await simulateHumanRead(jid);
     await executeStep(jid, 0);
 }
 
@@ -619,7 +776,7 @@ async function executeStep(jid, stepIndex) {
     // Concurrency lock per user
     if (userLocks.has(jid)) {
         console.log(`[Baileys Lock] Step execution currently active for ${jid}, queuing step ${stepIndex}`);
-        setTimeout(() => executeStep(jid, stepIndex), 800);
+        setTimeout(() => executeStep(jid, stepIndex), 1000);
         return;
     }
     userLocks.add(jid);
@@ -644,6 +801,7 @@ async function executeStep(jid, stepIndex) {
                 waitTimeoutId: null
             };
             saveUserStates();
+            scheduleOfflinePresence();
             return;
         }
 
@@ -662,6 +820,12 @@ async function executeStep(jid, stepIndex) {
 
             await sendStepPayload(jid, step);
 
+            // If the next step is immediately another message/question without an explicit wait step, add a natural human breather
+            const nextStep = steps[stepIndex + 1];
+            if (nextStep && nextStep.type !== 'wait') {
+                await delay(randomInt(2400, 4600));
+            }
+
             if (userStates[jid] && userStates[jid].status === 'running' && liveChats[jid]?.botStatus !== 'paused') {
                 userLocks.delete(jid);
                 return executeStep(jid, stepIndex + 1);
@@ -676,14 +840,17 @@ async function executeStep(jid, stepIndex) {
             };
             saveUserStates();
 
-            const delaySec = Math.max(parseFloat(step.duration) || 2, 1);
-            console.log(`[Baileys Wait] Step ${stepIndex + 1}: Waiting ${delaySec}s before step ${stepIndex + 2} for ${jid}...`);
+            // Layer 5: Add random human jitter (+3s to +7s + 30% variance) to break fixed robotic intervals
+            const baseSec = Math.max(parseFloat(step.duration) || 3, 2);
+            const jitterSec = (randomInt(30, 65) / 10) + (baseSec * (randomInt(15, 40) / 100));
+            const totalDelayMs = Math.round((baseSec + jitterSec) * 1000);
+            console.log(`[Anti-Ban Wait] Step ${stepIndex + 1}: Base ${baseSec}s -> Humanized ${(totalDelayMs / 1000).toFixed(1)}s for ${jid}...`);
 
             const timeoutId = setTimeout(() => {
                 if (userStates[jid] && userStates[jid].status === 'running' && liveChats[jid]?.botStatus !== 'paused') {
                     executeStep(jid, stepIndex + 1);
                 }
-            }, delaySec * 1000);
+            }, totalDelayMs);
             userStates[jid].waitTimeoutId = timeoutId;
         } else if (step.type === 'question') {
             userStates[jid] = {
@@ -708,12 +875,14 @@ async function executeStep(jid, stepIndex) {
                     userStates[jid].lastActive = Date.now();
                     saveUserStates();
 
+                    await simulateHumanRead(jid);
                     userLocks.delete(jid);
                     return executeStep(jid, stepIndex + 1);
                 } else {
                     userStates[jid].status = 'waiting_reply';
                     userStates[jid].lastActive = Date.now();
                     saveUserStates();
+                    scheduleOfflinePresence();
                     console.log(`🛑 [Baileys Question] Step ${stepIndex + 1} PAUSED. Bot is strictly waiting for user ${jid} to reply.`);
                 }
             }
@@ -728,98 +897,150 @@ async function executeStep(jid, stepIndex) {
 async function sendStepPayload(jid, step) {
     if (!sock || !clientReady) return;
 
-    try {
-        const isAudio = step.media && (step.media.endsWith('.mp3') || step.media.endsWith('.ogg') || step.media.endsWith('.m4a') || step.media.endsWith('.wav'));
-        
+    return enqueueHumanSend(jid, async () => {
+        if (!sock || !clientReady) return;
+
         try {
+            const isAudio = step.media && (step.media.endsWith('.mp3') || step.media.endsWith('.ogg') || step.media.endsWith('.m4a') || step.media.endsWith('.wav'));
+            const hasVisualMedia = step.media && !isAudio;
+
+            try {
+                await sock.sendPresenceUpdate('available', jid);
+            } catch (e) {}
+
+            // Layer 3: Realistic Human Typing / Audio Recording Cadence
             if (isAudio) {
-                await sock.sendPresenceUpdate('recording', jid);
-            } else {
-                await sock.sendPresenceUpdate('composing', jid);
-            }
-        } catch (presErr) {}
-
-        const textLen = step.text ? step.text.length : 0;
-        const typingDelayMs = Math.min(Math.max(textLen * 35, 1200), 4000);
-        await delay(typingDelayMs);
-
-        try {
-            await sock.sendPresenceUpdate('paused', jid);
-        } catch (presErr) {}
-
-        let mediaSent = false;
-        if (step.media) {
-            const mediaFullPath = path.join(__dirname, step.media);
-            if (fs.existsSync(mediaFullPath)) {
-                const ext = path.extname(mediaFullPath).toLowerCase();
-                const buffer = fs.readFileSync(mediaFullPath);
-
-                if (isAudio) {
-                    const audioInfo = await convertToUniversalAudio(mediaFullPath, 'm4a');
-                    const audioBuffer = fs.readFileSync(audioInfo.path);
-                    const wave = generateWaveform();
-
-                    await sock.sendMessage(jid, {
-                        audio: audioBuffer,
-                        mimetype: 'audio/mp4',
-                        ptt: true,
-                        seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined,
-                        waveform: wave
-                    });
-                    recordOutgoingMessage(jid, '', step.media);
-                    mediaSent = true;
-                } else if (['.jpg', '.jpeg', '.png', '.gif'].includes(ext)) {
-                    await sock.sendMessage(jid, {
-                        image: buffer,
-                        caption: step.text || undefined
-                    });
-                    recordOutgoingMessage(jid, step.text || '', step.media);
-                    mediaSent = true;
-                    return;
-                } else if (['.mp4', '.mov', '.avi'].includes(ext)) {
-                    try {
-                        console.log(`[Baileys Video] Sending video to ${jid} (${step.media})`);
-                        await sock.sendMessage(jid, {
-                            video: buffer,
-                            mimetype: 'video/mp4',
-                            caption: step.text || undefined
-                        });
-                        recordOutgoingMessage(jid, step.text || '', step.media);
-                        mediaSent = true;
-                        return;
-                    } catch (vidErr) {
-                        console.error(`[Baileys Video Error] Failed to send native video, falling back to document:`, vidErr);
-                        await sock.sendMessage(jid, {
-                            document: buffer,
-                            mimetype: 'video/mp4',
-                            fileName: path.basename(mediaFullPath),
-                            caption: step.text || undefined
-                        });
-                        recordOutgoingMessage(jid, step.text || '', step.media);
-                        mediaSent = true;
-                        return;
-                    }
+                try {
+                    await sock.sendPresenceUpdate('recording', jid);
+                } catch (e) {}
+                const recordDurationMs = randomInt(5000, 8800);
+                if (recordDurationMs > 4500) {
+                    await delay(4000);
+                    try { await sock.sendPresenceUpdate('recording', jid); } catch (e) {}
+                    await delay(recordDurationMs - 4000);
                 } else {
-                    await sock.sendMessage(jid, {
-                        document: buffer,
-                        mimetype: 'application/octet-stream',
-                        fileName: path.basename(mediaFullPath),
-                        caption: step.text || undefined
-                    });
-                    recordOutgoingMessage(jid, step.text || '', step.media);
-                    mediaSent = true;
-                    return;
+                    await delay(recordDurationMs);
+                }
+            } else if (hasVisualMedia) {
+                // Simulating opening gallery & picking photo/video
+                await delay(randomInt(2200, 3800));
+                if (step.text) {
+                    try { await sock.sendPresenceUpdate('composing', jid); } catch (e) {}
+                    const captionDelay = Math.min(Math.max(step.text.length * randomInt(42, 60), 2500), 6500);
+                    await delay(captionDelay);
+                }
+            } else {
+                try {
+                    await sock.sendPresenceUpdate('composing', jid);
+                } catch (e) {}
+                const textLen = step.text ? step.text.length : 20;
+                const typingDelayMs = Math.min(Math.max(textLen * randomInt(45, 65), 3200), 8500) + randomInt(300, 1100);
+                if (typingDelayMs > 4500) {
+                    await delay(4200);
+                    try { await sock.sendPresenceUpdate('composing', jid); } catch (e) {}
+                    await delay(typingDelayMs - 4200);
+                } else {
+                    await delay(typingDelayMs);
                 }
             }
-        }
 
-        if (step.text && (!mediaSent || isAudio)) {
-            await sock.sendMessage(jid, { text: step.text });
-            recordOutgoingMessage(jid, step.text, null);
+            try {
+                await sock.sendPresenceUpdate('paused', jid);
+            } catch (presErr) {}
+            await delay(randomInt(300, 650));
+
+            const safeCaption = step.text ? humanizeText(step.text) : undefined;
+
+            let mediaSent = false;
+            if (step.media) {
+                const mediaFullPath = path.join(__dirname, step.media);
+                if (fs.existsSync(mediaFullPath)) {
+                    const ext = path.extname(mediaFullPath).toLowerCase();
+                    const rawBuffer = fs.readFileSync(mediaFullPath);
+
+                    if (isAudio) {
+                        const audioInfo = await convertToUniversalAudio(mediaFullPath, 'm4a');
+                        const audioBuffer = humanizeMediaBuffer(fs.readFileSync(audioInfo.path));
+                        const wave = generateWaveform();
+
+                        await sock.sendMessage(jid, {
+                            audio: audioBuffer,
+                            mimetype: 'audio/mp4',
+                            ptt: true,
+                            seconds: audioInfo.seconds > 0 ? audioInfo.seconds : undefined,
+                            waveform: wave
+                        });
+                        recordOutgoingMessage(jid, '', step.media);
+                        mediaSent = true;
+                    } else if (['.jpg', '.jpeg', '.png', '.gif'].includes(ext)) {
+                        const imgBuffer = humanizeMediaBuffer(rawBuffer);
+                        await sock.sendMessage(jid, {
+                            image: imgBuffer,
+                            caption: safeCaption
+                        });
+                        recordOutgoingMessage(jid, step.text || '', step.media);
+                        mediaSent = true;
+                        scheduleOfflinePresence();
+                        return;
+                    } else if (['.mp4', '.mov', '.avi'].includes(ext)) {
+                        const vidBuffer = humanizeMediaBuffer(rawBuffer);
+                        try {
+                            console.log(`[Baileys Video] Sending humanized video to ${jid} (${step.media})`);
+                            await sock.sendMessage(jid, {
+                                video: vidBuffer,
+                                mimetype: 'video/mp4',
+                                caption: safeCaption
+                            });
+                            recordOutgoingMessage(jid, step.text || '', step.media);
+                            mediaSent = true;
+                            scheduleOfflinePresence();
+                            return;
+                        } catch (vidErr) {
+                            console.error(`[Baileys Video Error] Failed to send native video, falling back to document:`, vidErr);
+                            await sock.sendMessage(jid, {
+                                document: vidBuffer,
+                                mimetype: 'video/mp4',
+                                fileName: path.basename(mediaFullPath),
+                                caption: safeCaption
+                            });
+                            recordOutgoingMessage(jid, step.text || '', step.media);
+                            mediaSent = true;
+                            scheduleOfflinePresence();
+                            return;
+                        }
+                    } else {
+                        const docBuffer = humanizeMediaBuffer(rawBuffer);
+                        await sock.sendMessage(jid, {
+                            document: docBuffer,
+                            mimetype: 'application/octet-stream',
+                            fileName: path.basename(mediaFullPath),
+                            caption: safeCaption
+                        });
+                        recordOutgoingMessage(jid, step.text || '', step.media);
+                        mediaSent = true;
+                        scheduleOfflinePresence();
+                        return;
+                    }
+                }
+            }
+
+            if (step.text && (!mediaSent || isAudio)) {
+                if (isAudio) {
+                    // Wait briefly after sending voice note before sending accompanying text
+                    await delay(randomInt(1500, 2800));
+                    try { await sock.sendPresenceUpdate('composing', jid); } catch (e) {}
+                    await delay(Math.min(Math.max(step.text.length * 45, 2200), 5500));
+                    try { await sock.sendPresenceUpdate('paused', jid); } catch (e) {}
+                }
+                await sock.sendMessage(jid, { text: safeCaption });
+                recordOutgoingMessage(jid, step.text, null);
+            }
+
+            scheduleOfflinePresence();
+        } catch (err) {
+            console.error(`Error sending step payload to ${jid}:`, err);
         }
-    } catch (err) {
-        console.error(`Error sending step payload to ${jid}:`, err);
-    }
+    });
 }
 
 // API Routes
@@ -872,8 +1093,65 @@ app.get('/api/status', (req, res) => {
         qr: currentQR,
         status: initStatus,
         error: initError,
-        user: connectedUser
+        user: connectedUser,
+        antiBan: {
+            active: true,
+            layers: 7,
+            mode: 'Stealth Human Simulation'
+        }
     });
+});
+
+// Layer 7: Connect via 8-Digit Pairing Code (No QR Code / No Camera needed)
+app.post('/api/pair-code', checkAuth, async (req, res) => {
+    try {
+        const rawPhone = String(req.body?.phone || '');
+        const cleanPhone = rawPhone.replace(/\D/g, '');
+        if (!cleanPhone || cleanPhone.length < 8 || cleanPhone.length > 15) {
+            return res.status(400).json({
+                error: 'Digite o número completo com código do país (ex: 258841234567).'
+            });
+        }
+
+        if (clientReady) {
+            return res.status(400).json({
+                error: 'O WhatsApp já está conectado! Desconecte primeiro se quiser trocar de número.'
+            });
+        }
+
+        // Ensure we have an active unauthenticated socket ready for pairing
+        if (!sock) {
+            await initWhatsApp();
+        }
+
+        // Wait up to 6 seconds for socket to reach waiting_qr / initialized state
+        for (let i = 0; i < 12; i++) {
+            if (sock && (initStatus === 'waiting_qr' || currentQR)) break;
+            await delay(500);
+        }
+
+        if (!sock || typeof sock.requestPairingCode !== 'function') {
+            return res.status(503).json({
+                error: 'A conexão ainda está a iniciar. Aguarde 3 segundos e tente novamente.'
+            });
+        }
+
+        await delay(1000);
+        const code = await sock.requestPairingCode(cleanPhone);
+        const formatted = code && code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
+        console.log(`[Baileys Pairing Code] Generated code ${formatted} for +${cleanPhone}`);
+
+        return res.json({
+            success: true,
+            code: formatted,
+            phone: '+' + cleanPhone
+        });
+    } catch (err) {
+        console.error('[Baileys Pairing Code Error]:', err);
+        return res.status(500).json({
+            error: 'Não foi possível gerar o código agora. Clique em "Gerar Novo QR Code" e tente novamente em 3 segundos.'
+        });
+    }
 });
 
 app.get('/api/test-audio', checkAuth, async (req, res) => {
