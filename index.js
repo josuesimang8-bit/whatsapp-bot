@@ -307,14 +307,14 @@ async function simulateHumanRead(jid) {
     lastIncomingKeys.delete(jid);
 
     try {
-        // 1. Wait 1.6s - 3.2s simulating human picking up phone after notification
-        await delay(randomInt(1600, 3200));
+        // 1. Wait 2.2s - 4.8s simulating human picking up phone after notification
+        await delay(randomInt(2200, 4800));
         // 2. Come online
         await sock.sendPresenceUpdate('available', jid);
         // 3. Mark message as read (blue ticks) just like opening the chat in official WhatsApp
         await sock.readMessages([msgKey]);
-        // 4. Wait 1.2s - 2.4s simulating human reading the message before typing
-        await delay(randomInt(1200, 2400));
+        // 4. Wait 1.5s - 3.2s simulating human reading the message before typing
+        await delay(randomInt(1500, 3200));
         scheduleOfflinePresence();
     } catch (e) {}
 }
@@ -324,7 +324,7 @@ function enqueueHumanSend(jid, taskFn) {
     const nextTask = globalSendQueue.then(async () => {
         if (lastHandledJid && lastHandledJid !== jid) {
             // Natural pause when switching between different customer chats
-            await delay(randomInt(1500, 2800));
+            await delay(randomInt(2200, 4000));
         }
         lastHandledJid = jid;
         return await taskFn();
@@ -390,8 +390,8 @@ async function initWhatsApp() {
             keepAliveIntervalMs: 30000,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
-            retryRequestDelayMs: 600,
-            maxMsgRetryCount: 5
+            retryRequestDelayMs: 1000,
+            maxMsgRetryCount: 3
         });
 
         sock.ev.on('creds.update', saveCreds);
@@ -450,10 +450,7 @@ async function initWhatsApp() {
                 initStatus = 'ready';
                 currentQR = '';
                 initError = '';
-                // Keep readyTimestamp from initial session start so brief reconnects never ignore leads who messaged during reconnect
-                if (!connectedUser) {
-                    readyTimestamp = Math.floor(Date.now() / 1000);
-                }
+                readyTimestamp = Math.floor(Date.now() / 1000);
 
                 const rawId = sock.user?.id || '';
                 const phone = rawId.split(':')[0] || rawId.split('@')[0];
@@ -471,7 +468,7 @@ async function initWhatsApp() {
         // Messages handling (Protected by Layer 1 Strict Real-Message Filter)
         sock.ev.on('messages.upsert', async (m) => {
             try {
-                if (m.type !== 'notify' && m.type !== 'append') return;
+                if (m.type !== 'notify') return;
 
                 for (const msg of m.messages) {
                     try {
@@ -482,39 +479,16 @@ async function initWhatsApp() {
                         // Strictly allow only direct 1-on-1 user chats (ignore groups, status, broadcasts, newsletters)
                         if (!jid || jid.endsWith('@g.us') || jid.includes('broadcast') || jid.endsWith('@newsletter')) continue;
 
-                        // Ignore old history sync messages from before the bot connected (allow 90s buffer for clock drift / reconnects)
+                        // Ignore catch-up messages from before the bot connected
                         const msgTimestamp = Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000);
-                        if (msgTimestamp < readyTimestamp - 90) {
-                            continue;
-                        }
-                        // For 'append' events, only process fresh messages from the last 120 seconds
-                        if (m.type === 'append' && msgTimestamp < Math.floor(Date.now() / 1000) - 120) {
+                        if (msgTimestamp < readyTimestamp - 5) {
                             continue;
                         }
 
-                        // Unwrap ephemeral / viewOnce / CTWA containers FIRST before checking processedMsgIds!
-                        // (If msg.message is null due to initial Signal PreKey CIPHERTEXT retry, we MUST NOT mark msg.key.id as processed yet!)
+                        // Unwrap ephemeral / viewOnce containers
+                        // NEVER reply if rawMsg is null/undecrypted (sending to undecrypted stubs triggers immediate 401 ban!)
                         const rawMsg = unwrapMessage(msg.message);
-                        if (!rawMsg) {
-                            // If WhatsApp delivered an undecrypted user message stub (CIPHERTEXT === 2), wait 6s for the phone's retry.
-                            // If the lead's mobile internet dropped and the retry never arrives, still start/advance their flow so NO lead is ever ignored!
-                            if (msg.messageStubType === 2 && msg.key?.id && !processedMsgIds.has(msg.key.id)) {
-                                const stubMsgId = msg.key.id;
-                                console.log(`[Baileys Cipher Recovery] Waiting up to 6s for decryption retry from ${jid} (msgId: ${stubMsgId})...`);
-                                setTimeout(async () => {
-                                    try {
-                                        if (!processedMsgIds.has(stubMsgId) && clientReady) {
-                                            processedMsgIds.add(stubMsgId);
-                                            console.log(`[Baileys Cipher Recovery] Retry did not arrive in 6s for ${jid}. Triggering flow automatically so lead is not ignored!`);
-                                            lastIncomingKeys.set(jid, msg.key);
-                                            recordIncomingMessage(jid, '[Mensagem de Anúncio]', msg);
-                                            await handleFlowForUser(jid, '[Mensagem de Anúncio]');
-                                        }
-                                    } catch (e) {}
-                                }, 6000);
-                            }
-                            continue;
-                        }
+                        if (!rawMsg) continue;
 
                         // Strictly ignore WhatsApp internal protocol / encryption / reaction / receipt packets
                         if (
@@ -529,7 +503,7 @@ async function initWhatsApp() {
                             continue;
                         }
 
-                        // Extract authentic human text or explicit media attachment (including Click-to-WhatsApp Ad templates)
+                        // Extract authentic human text or explicit media attachment
                         const text = (
                             rawMsg.conversation ||
                             rawMsg.extendedTextMessage?.text ||
@@ -538,10 +512,6 @@ async function initWhatsApp() {
                             rawMsg.buttonsResponseMessage?.selectedDisplayText ||
                             rawMsg.listResponseMessage?.title ||
                             rawMsg.templateButtonReplyMessage?.selectedDisplayText ||
-                            rawMsg.templateMessage?.hydratedTemplate?.hydratedContentText ||
-                            rawMsg.interactiveResponseMessage?.body?.text ||
-                            rawMsg.buttonsMessage?.contentText ||
-                            rawMsg.listMessage?.description ||
                             ''
                         ).trim();
 
@@ -560,7 +530,7 @@ async function initWhatsApp() {
                             continue;
                         }
 
-                        // Deduplicate message IDs ONLY AFTER confirming valid decrypted content!
+                        // Deduplicate message IDs ONLY AFTER confirming valid decrypted content
                         if (msg.key.id) {
                             if (processedMsgIds.has(msg.key.id)) continue;
                             processedMsgIds.add(msg.key.id);
@@ -588,58 +558,6 @@ async function initWhatsApp() {
                 }
             } catch (err) {
                 console.error('Error in messages.upsert:', err);
-            }
-        });
-
-        // Catch late-decrypted messages delivered via messages.update after a Signal PreKey retry
-        sock.ev.on('messages.update', async (updates) => {
-            try {
-                for (const u of updates) {
-                    if (!u.key || u.key.fromMe || !u.update?.message) continue;
-                    const jid = u.key.remoteJid;
-                    if (!jid || jid.endsWith('@g.us') || jid.includes('broadcast') || jid.endsWith('@newsletter')) continue;
-                    if (u.key.id && processedMsgIds.has(u.key.id)) continue;
-
-                    const rawMsg = unwrapMessage(u.update.message);
-                    if (!rawMsg) continue;
-
-                    const text = (
-                        rawMsg.conversation ||
-                        rawMsg.extendedTextMessage?.text ||
-                        rawMsg.imageMessage?.caption ||
-                        rawMsg.videoMessage?.caption ||
-                        rawMsg.buttonsResponseMessage?.selectedDisplayText ||
-                        rawMsg.listResponseMessage?.title ||
-                        rawMsg.templateButtonReplyMessage?.selectedDisplayText ||
-                        rawMsg.templateMessage?.hydratedTemplate?.hydratedContentText ||
-                        rawMsg.interactiveResponseMessage?.body?.text ||
-                        rawMsg.buttonsMessage?.contentText ||
-                        rawMsg.listMessage?.description ||
-                        ''
-                    ).trim();
-
-                    const mediaTypeLabel =
-                        rawMsg.audioMessage ? '[Áudio recebido]' :
-                        rawMsg.imageMessage ? '[Imagem recebida]' :
-                        rawMsg.videoMessage ? '[Vídeo recebido]' :
-                        rawMsg.documentMessage ? '[Documento recebido]' :
-                        rawMsg.stickerMessage ? '[Figurinha]' : '';
-
-                    const incomingContent = text || mediaTypeLabel;
-                    if (!incomingContent) continue;
-
-                    if (u.key.id) {
-                        processedMsgIds.add(u.key.id);
-                    }
-                    console.log(`[Baileys Decrypted Update] ${jid}: "${incomingContent}"`);
-                    lastIncomingKeys.set(jid, u.key);
-                    recordIncomingMessage(jid, incomingContent, { key: u.key, pushName: jid.split('@')[0] });
-                    if (clientReady) {
-                        await handleFlowForUser(jid, incomingContent);
-                    }
-                }
-            } catch (err) {
-                console.error('Error in messages.update:', err);
             }
         });
 
@@ -1398,7 +1316,14 @@ app.get('/api/messages/:jid', checkAuth, (req, res) => {
     if (chat) {
         chat.unread = 0;
         saveChats();
-        res.json({ success: true, chat: chat, flowState: userStates[jid] || null });
+        const st = userStates[jid];
+        const safeState = st ? {
+            currentStepIndex: st.currentStepIndex,
+            status: st.status,
+            lastActive: st.lastActive,
+            answers: st.answers || {}
+        } : null;
+        res.json({ success: true, chat: chat, flowState: safeState });
     } else {
         res.status(404).json({ error: 'Chat not found' });
     }
