@@ -319,12 +319,30 @@ async function simulateHumanRead(jid) {
     } catch (e) {}
 }
 
-// Layer 5: Global Single-Human Send Queue (prevents typing in multiple chats simultaneously)
+// Layer 5: Global Single-Human Send Queue + 4 Messages/Minute Rate Limiter
+const sentMessageTimestamps = []; // sliding window of outgoing message timestamps (ms)
+const MAX_MSGS_PER_MINUTE = 4;
+
+async function enforceGlobalRateLimit() {
+    const now = Date.now();
+    while (sentMessageTimestamps.length > 0 && now - sentMessageTimestamps[0] > 60000) {
+        sentMessageTimestamps.shift();
+    }
+    if (sentMessageTimestamps.length >= MAX_MSGS_PER_MINUTE) {
+        const oldest = sentMessageTimestamps[0];
+        const waitMs = Math.max(60000 - (now - oldest), 2000) + randomInt(3500, 7500);
+        console.log(`[Anti-Ban Rate Limit] ${sentMessageTimestamps.length} msgs sent in last 60s. Cooling down ${(waitMs / 1000).toFixed(1)}s...`);
+        await delay(waitMs);
+    }
+    sentMessageTimestamps.push(Date.now());
+}
+
 function enqueueHumanSend(jid, taskFn) {
     const nextTask = globalSendQueue.then(async () => {
+        await enforceGlobalRateLimit();
         if (lastHandledJid && lastHandledJid !== jid) {
             // Natural pause when switching between different customer chats
-            await delay(randomInt(2200, 4000));
+            await delay(randomInt(3500, 6500));
         }
         lastHandledJid = jid;
         return await taskFn();
@@ -333,6 +351,98 @@ function enqueueHumanSend(jid, taskFn) {
     });
     globalSendQueue = nextTask;
     return nextTask;
+}
+
+// Layer 8: Anti-Report Shield (Auto-pauses bot if lead accuses of scam, insults, or explicitly refuses)
+const HOSTILE_OR_REFUSAL_TERMS = [
+    'burla', 'burlador', 'burladores', 'golpe', 'golpista', 'aldrab',
+    'ladrao', 'ladrão', 'ladroes', 'roubo', 'roubar', 'devolv',
+    'policia', 'polícia', 'cadeia', 'puta', 'merda', 'falso', 'mentira',
+    'enganar', 'engano', 'macaco', 'macacu', 'nao quero', 'não quero',
+    'ja nao quero', 'já não quero', 'cancela', 'deixa pra la'
+];
+
+function isHostileOrNegativeMessage(text) {
+    if (!text || typeof text !== 'string') return false;
+    const norm = text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    for (const term of HOSTILE_OR_REFUSAL_TERMS) {
+        const normTerm = term.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        if (norm.includes(normTerm)) return true;
+    }
+    return false;
+}
+
+// Layer 9: Single-Lead Focus Lock (Attends 1 Lead at a time until Question or Completion, queuing others)
+let activeLeadJid = null;
+let activeLeadLockTimer = null;
+const waitingLeadsQueue = []; // [{ jid, actionFn }]
+let isProcessingNextLead = false;
+
+function acquireLeadFocus(jid) {
+    activeLeadJid = jid;
+    if (activeLeadLockTimer) clearTimeout(activeLeadLockTimer);
+    // Safety timeout: release focus after max 4 minutes in case a step hangs
+    activeLeadLockTimer = setTimeout(() => {
+        if (activeLeadJid === jid) {
+            releaseLeadFocus(jid);
+        }
+    }, 240000);
+}
+
+function releaseLeadFocus(jid) {
+    const qIdx = waitingLeadsQueue.findIndex(item => item.jid === jid);
+    if (qIdx !== -1) waitingLeadsQueue.splice(qIdx, 1);
+    if (activeLeadJid && activeLeadJid !== jid) return;
+    activeLeadJid = null;
+    if (activeLeadLockTimer) {
+        clearTimeout(activeLeadLockTimer);
+        activeLeadLockTimer = null;
+    }
+    processNextWaitingLead();
+}
+
+function processNextWaitingLead() {
+    if (isProcessingNextLead || activeLeadJid || waitingLeadsQueue.length === 0) return;
+    isProcessingNextLead = true;
+    const cooldownMs = randomInt(14000, 26000); // 14s to 26s human breather before opening the next lead's chat!
+    console.log(`[Single-Lead Queue] ${waitingLeadsQueue.length} lead(s) waiting. Taking ${(cooldownMs / 1000).toFixed(1)}s human break before next lead...`);
+    setTimeout(async () => {
+        isProcessingNextLead = false;
+        if (activeLeadJid || waitingLeadsQueue.length === 0) return;
+        const nextItem = waitingLeadsQueue.shift();
+        if (nextItem) {
+            acquireLeadFocus(nextItem.jid);
+            try {
+                await nextItem.actionFn();
+            } catch (e) {
+                console.error('[Single-Lead Queue Error]:', e);
+                releaseLeadFocus(nextItem.jid);
+            }
+        }
+    }, cooldownMs);
+}
+
+function runOrQueueLeadSequence(jid, actionFn) {
+    if (activeLeadJid === jid || (!activeLeadJid && !isProcessingNextLead && waitingLeadsQueue.length === 0)) {
+        acquireLeadFocus(jid);
+        actionFn().catch((e) => {
+            console.error('[Lead Sequence Error]:', e);
+            releaseLeadFocus(jid);
+        });
+        return;
+    }
+    // Replace any existing queued action for the same jid so they don't duplicate in queue
+    const existingIdx = waitingLeadsQueue.findIndex(item => item.jid === jid);
+    if (existingIdx !== -1) {
+        waitingLeadsQueue[existingIdx].actionFn = actionFn;
+        console.log(`[Single-Lead Queue] Updated queued action for ${jid} (Position ${existingIdx + 1}/${waitingLeadsQueue.length})`);
+    } else {
+        waitingLeadsQueue.push({ jid, actionFn });
+        console.log(`[Single-Lead Queue] Bot is busy attending ${activeLeadJid || 'cooldown'}. Queued ${jid} (Position ${waitingLeadsQueue.length})`);
+    }
+    if (!activeLeadJid && !isProcessingNextLead) {
+        processNextWaitingLead();
+    }
 }
 // =========================================================================
 
@@ -698,6 +808,7 @@ async function handleFlowForUser(jid, incomingText) {
         }
         delete userStates[jid];
         saveUserStates();
+        releaseLeadFocus(jid);
         if (liveChats[jid]) {
             liveChats[jid].botStatus = 'active';
             saveChats();
@@ -708,6 +819,28 @@ async function handleFlowForUser(jid, incomingText) {
                 text: humanizeText('🔄 O seu fluxo foi reiniciado com sucesso!\nEnvie qualquer mensagem para começar novamente.')
             });
         }
+        return;
+    }
+
+    // Layer 8: Anti-Report Shield -> immediately pause bot if user sends scam accusations, insults, or explicit refusal
+    if (isHostileOrNegativeMessage(rawText)) {
+        console.log(`🛡️ [Anti-Report Shield] Hostile/refusal message detected from ${jid}: "${rawText}". Auto-pausing bot to prevent WhatsApp report!`);
+        if (userStates[jid]?.waitTimeoutId) {
+            clearTimeout(userStates[jid].waitTimeoutId);
+        }
+        userStates[jid] = {
+            ...(userStates[jid] || { currentStepIndex: 0, answers: {} }),
+            status: 'paused',
+            lastActive: Date.now(),
+            pendingReply: null,
+            waitTimeoutId: null
+        };
+        saveUserStates();
+        if (liveChats[jid]) {
+            liveChats[jid].botStatus = 'paused';
+            saveChats();
+        }
+        releaseLeadFocus(jid);
         return;
     }
 
@@ -738,9 +871,9 @@ async function handleFlowForUser(jid, incomingText) {
         return;
     }
 
-    // If waiting for reply to a question -> user answered! Advance to next step
+    // If waiting for reply to a question -> user answered! Advance to next step (via Single-Lead Focus Queue)
     if (state && state.status === 'waiting_reply') {
-        console.log(`[Baileys Flow] User ${jid} answered question step ${state.currentStepIndex + 1}: "${rawText}". Advancing to step ${state.currentStepIndex + 2}...`);
+        console.log(`[Baileys Flow] User ${jid} answered question step ${state.currentStepIndex + 1}: "${rawText}". Queuing step ${state.currentStepIndex + 2}...`);
         if (!state.answers) state.answers = {};
         state.answers[state.currentStepIndex] = rawText || '[Resposta]';
         state.status = 'running';
@@ -748,8 +881,11 @@ async function handleFlowForUser(jid, incomingText) {
         state.pendingReply = null;
         saveUserStates();
 
-        await simulateHumanRead(jid);
-        await executeStep(jid, state.currentStepIndex + 1);
+        const nextStepIdx = state.currentStepIndex + 1;
+        runOrQueueLeadSequence(jid, async () => {
+            await simulateHumanRead(jid);
+            await executeStep(jid, nextStepIdx);
+        });
         return;
     }
 
@@ -759,7 +895,7 @@ async function handleFlowForUser(jid, incomingText) {
         return;
     }
 
-    // New conversation -> reserve state immediately to prevent double-start, simulate human read, then start step 0
+    // New conversation -> reserve state immediately to prevent double-start, then run or queue in Single-Lead Focus Mode
     console.log(`[Baileys Flow] Starting new automated funnel for ${jid}`);
     userStates[jid] = {
         currentStepIndex: 0,
@@ -771,8 +907,10 @@ async function handleFlowForUser(jid, incomingText) {
     };
     saveUserStates();
 
-    await simulateHumanRead(jid);
-    await executeStep(jid, 0);
+    runOrQueueLeadSequence(jid, async () => {
+        await simulateHumanRead(jid);
+        await executeStep(jid, 0);
+    });
 }
 
 async function executeStep(jid, stepIndex) {
@@ -793,6 +931,12 @@ async function executeStep(jid, stepIndex) {
             userStates[jid].waitTimeoutId = null;
         }
 
+        // Stop and release focus if user was paused
+        if (liveChats[jid]?.botStatus === 'paused' || userStates[jid]?.status === 'paused') {
+            releaseLeadFocus(jid);
+            return;
+        }
+
         // Check if finished
         if (stepIndex >= steps.length) {
             console.log(`[Baileys Flow] Flow completed for ${jid}`);
@@ -804,9 +948,12 @@ async function executeStep(jid, stepIndex) {
                 waitTimeoutId: null
             };
             saveUserStates();
+            releaseLeadFocus(jid);
             scheduleOfflinePresence();
             return;
         }
+
+        acquireLeadFocus(jid);
 
         const step = steps[stepIndex];
         console.log(`[Baileys Step ${stepIndex + 1}/${steps.length}] (${step.type}) -> ${jid}`);
@@ -832,6 +979,8 @@ async function executeStep(jid, stepIndex) {
             if (userStates[jid] && userStates[jid].status === 'running' && liveChats[jid]?.botStatus !== 'paused') {
                 userLocks.delete(jid);
                 return executeStep(jid, stepIndex + 1);
+            } else {
+                releaseLeadFocus(jid);
             }
         } else if (step.type === 'wait') {
             userStates[jid] = {
@@ -849,9 +998,21 @@ async function executeStep(jid, stepIndex) {
             const totalDelayMs = Math.round((baseSec + jitterSec) * 1000);
             console.log(`[Anti-Ban Wait] Step ${stepIndex + 1}: Base ${baseSec}s -> Humanized ${(totalDelayMs / 1000).toFixed(1)}s for ${jid}...`);
 
+            // If this is a very long wait (>= 90s, e.g. 2-minute closing delay), release focus so other waiting leads can be served
+            const isLongWait = baseSec >= 90;
+            if (isLongWait) {
+                releaseLeadFocus(jid);
+            }
+
             const timeoutId = setTimeout(() => {
                 if (userStates[jid] && userStates[jid].status === 'running' && liveChats[jid]?.botStatus !== 'paused') {
-                    executeStep(jid, stepIndex + 1);
+                    if (isLongWait) {
+                        runOrQueueLeadSequence(jid, () => executeStep(jid, stepIndex + 1));
+                    } else {
+                        executeStep(jid, stepIndex + 1);
+                    }
+                } else {
+                    releaseLeadFocus(jid);
                 }
             }, totalDelayMs);
             userStates[jid].waitTimeoutId = timeoutId;
@@ -885,13 +1046,17 @@ async function executeStep(jid, stepIndex) {
                     userStates[jid].status = 'waiting_reply';
                     userStates[jid].lastActive = Date.now();
                     saveUserStates();
+                    releaseLeadFocus(jid);
                     scheduleOfflinePresence();
                     console.log(`🛑 [Baileys Question] Step ${stepIndex + 1} PAUSED. Bot is strictly waiting for user ${jid} to reply.`);
                 }
+            } else {
+                releaseLeadFocus(jid);
             }
         }
     } catch (err) {
         console.error(`Error in executeStep for ${jid}:`, err);
+        releaseLeadFocus(jid);
     } finally {
         userLocks.delete(jid);
     }
@@ -1336,6 +1501,7 @@ app.post('/api/reset-user/:jid', checkAuth, (req, res) => {
     }
     delete userStates[jid];
     saveUserStates();
+    releaseLeadFocus(jid);
     if (liveChats[jid]) {
         liveChats[jid].botStatus = 'active';
         saveChats();
@@ -1364,7 +1530,9 @@ app.post('/api/send', checkAuth, async (req, res) => {
         }
         if (userStates[jid]) {
             userStates[jid].status = 'paused';
+            saveUserStates();
         }
+        releaseLeadFocus(jid);
 
         res.json({ success: true });
     } catch (err) {
@@ -1384,6 +1552,10 @@ app.post('/api/bot-toggle/:jid', checkAuth, (req, res) => {
 
     if (userStates[jid]) {
         userStates[jid].status = nextStatus === 'paused' ? 'paused' : 'running';
+        saveUserStates();
+    }
+    if (nextStatus === 'paused') {
+        releaseLeadFocus(jid);
     }
     saveChats();
     res.json({ success: true, botStatus: nextStatus });
