@@ -353,13 +353,15 @@ function enqueueHumanSend(jid, taskFn) {
     return nextTask;
 }
 
-// Layer 8: Anti-Report Shield (Auto-pauses bot if lead accuses of scam, insults, or explicitly refuses)
+// Layer 8: Anti-Report Shield (Auto-pauses bot if lead accuses of scam, insults, explicitly refuses, or is an official OTP bot)
 const HOSTILE_OR_REFUSAL_TERMS = [
     'burla', 'burlador', 'burladores', 'golpe', 'golpista', 'aldrab',
     'ladrao', 'ladrão', 'ladroes', 'roubo', 'roubar', 'devolv',
     'policia', 'polícia', 'cadeia', 'puta', 'merda', 'falso', 'mentira',
     'enganar', 'engano', 'macaco', 'macacu', 'nao quero', 'não quero',
-    'ja nao quero', 'já não quero', 'cancela', 'deixa pra la'
+    'ja nao quero', 'já não quero', 'cancela', 'deixa pra la',
+    'codigo de confirmacao', 'codigo de verificacao', 'confirmacao do facebook',
+    'confirmation code', 'security code'
 ];
 
 function isHostileOrNegativeMessage(text) {
@@ -497,7 +499,7 @@ async function initWhatsApp() {
             markOnlineOnConnect: false,
             generateHighQualityLinkPreview: false,
             syncFullHistory: false,
-            keepAliveIntervalMs: 30000,
+            keepAliveIntervalMs: 15000,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             retryRequestDelayMs: 1000,
